@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-deko = "0.4.0"
-tar = "0.4.44"
+axfive-libzip = { path = "../axfive-libzip" }
+chaste-types = "0.5.0"
+chaste-yarn = { version = "0.5.0", default-features = false, features = ["berry", "classic"] }
 chrono = { version = "0.4.40", default-features = false, features = ["std"] }
-axfive-libzip = { git = "https://gitlab.com/yu-re-ka/axfive-libzip" }
+deko = { version = "0.4.0", default-features = false, features = ["flate2"] }
 dostime = { version = "1.0.0", features = ["chrono-1"] }
+hex = "0.4.3"
+oxhttp = { version = "0.3.0", default-features = false, features = ["client", "native-tls"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_yml = "0.0.12"
+sha2 = "0.10.8"
+ssri = "9.2.0"
+tar = "0.4.44"
