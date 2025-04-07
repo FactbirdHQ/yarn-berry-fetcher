@@ -13,12 +13,7 @@
         pkg-config,
         libzip,
         openssl,
-        zlib-ng,
-        fetchFromGitHub,
-        fetchurl,
-        fetchpatch,
-        autoreconfHook,
-        YARN_ZIP_SUPPORTED_LOCKFILE_VERSION ? 6,
+        YARN_ZIP_SUPPORTED_LOCKFILE_VERSION ? 8,
       }:
 
       rustPlatform.buildRustPackage {
@@ -52,7 +47,7 @@
       libzip = nixpkgs.legacyPackages.aarch64-linux.libzip.override {
         zlib = nixpkgs.legacyPackages.aarch64-linux.zlib-ng.override { withZlibCompat = true; };
       };
-      YARN_ZIP_SUPPORTED_LOCKFILE_VERSION = 8;
+      YARN_ZIP_SUPPORTED_LOCKFILE_VERSION = 10;
     };
 
     packages.aarch64-linux.default = self.packages.aarch64-linux.yarn-zip-4;
