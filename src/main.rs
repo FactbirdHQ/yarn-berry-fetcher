@@ -3,6 +3,7 @@ mod zip;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use rayon::prelude::*;
 use chaste_types::PackageSource;
 use oxhttp::model::{Body, Request, StatusCode};
 use serde::Deserialize;
@@ -18,7 +19,6 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let lockfile_path = args.next().expect("yarn-zip <project_dir>");
     let lockfile = chaste_yarn::parse(&lockfile_path).unwrap();
-    let client = oxhttp::Client::new();
     let mut hashes_done = HashSet::new();
 
     let cache_version = {
@@ -96,51 +96,57 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    for (version, name, name_with_scope, expected_hash) in packages {
-        let url = format!(
-            "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-            name_with_scope,
-            name.name_rest(),
-            version
+    rayon::ThreadPoolBuilder::new().num_threads(20).build_global().unwrap();
+    packages
+        .into_par_iter()
+        .for_each_init(
+            oxhttp::Client::new,
+            |client, (version, name, name_with_scope, expected_hash)| {
+                let url = format!(
+                    "https://registry.npmjs.org/{}/-/{}-{}.tgz",
+                    name_with_scope,
+                    name.name_rest(),
+                    version
+                );
+                //println!("Fetching {}", url);
+                let response = client
+                    .request(Request::builder().uri(&url).body(Body::empty()).unwrap())
+                    .unwrap();
+
+                if response.status() != StatusCode::OK {
+                    println!("Failed to fetch {}: {}", url, response.status());
+                    std::process::exit(1);
+                }
+
+                let cache_key = cache_version.version;
+                let hash_key = &expected_hash[..10]; // TODO figure out what this actually is
+
+                let dst = PathBuf::from(format!(
+                    "out/{}-npm-{}-{}-{}.zip",
+                    name.name_rest(),
+                    version,
+                    hash_key,
+                    cache_key
+                ));
+                zip::write_yarn_zip(
+                    &name_with_scope,
+                    dst.clone(),
+                    response.into_body(),
+                    cache_version.compression,
+                );
+
+                let mut hasher = Sha512::new();
+                let mut file = std::fs::File::open(dst).unwrap();
+                std::io::copy(&mut file, &mut hasher).unwrap();
+                let out_hash = hex::encode(hasher.finalize());
+                if expected_hash == out_hash {
+                    println!("Success:  {}", url);
+                } else {
+                    println!("Fail:     {}", url);
+                    println!("  expected: {}", expected_hash);
+                    println!("  got:      {}", out_hash);
+                    std::process::exit(1);
+                }
+            }
         );
-        //println!("Fetching {}", url);
-        let response = client
-            .request(Request::builder().uri(&url).body(Body::empty()).unwrap())
-            .unwrap();
-
-        if response.status() != StatusCode::OK {
-            println!("Failed to fetch {}: {}", url, response.status());
-            std::process::exit(1);
-        }
-
-        let cache_key = cache_version.version;
-        let hash_key = &expected_hash[..10]; // TODO figure out what this actually is
-
-        let dst = PathBuf::from(format!(
-            "out/{}-npm-{}-{}-{}.zip",
-            name.name_rest(),
-            version,
-            hash_key,
-            cache_key
-        ));
-        zip::write_yarn_zip(
-            &name_with_scope,
-            dst.clone(),
-            response.into_body(),
-            cache_version.compression,
-        );
-
-        let mut hasher = Sha512::new();
-        let mut file = std::fs::File::open(dst).unwrap();
-        std::io::copy(&mut file, &mut hasher).unwrap();
-        let out_hash = hex::encode(hasher.finalize());
-        if expected_hash == out_hash {
-            println!("Success:  {}", url);
-        } else {
-            println!("Fail:     {}", url);
-            println!("  expected: {}", expected_hash);
-            println!("  got:      {}", out_hash);
-            std::process::exit(1);
-        }
-    }
 }

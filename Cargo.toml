@@ -12,6 +12,7 @@ deko = { version = "0.4.0", default-features = false, features = ["flate2"] }
 dostime = { version = "1.0.0", features = ["chrono-1"] }
 hex = "0.4.3"
 oxhttp = { version = "0.3.0", default-features = false, features = ["client", "native-tls"] }
+rayon = "1.10.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_yml = "0.0.12"
 sha2 = "0.10.8"
