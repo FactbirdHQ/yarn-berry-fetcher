@@ -16,7 +16,7 @@ struct CacheKey {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let lockfile_path = args.next().unwrap();
+    let lockfile_path = args.next().expect("yarn-zip <project_dir>");
     let lockfile = chaste_yarn::parse(&lockfile_path).unwrap();
     let client = oxhttp::Client::new();
     let mut hashes_done = HashSet::new();
@@ -44,6 +44,9 @@ fn main() {
         }
     };
     println!("{:?}", cache_version);
+
+    let supported_version: usize = std::env!("YARN_ZIP_SUPPORTED_LOCKFILE_VERSION").parse().unwrap();
+    assert_eq!(cache_version.version, supported_version);
 
     let packages = lockfile
         .packages()
