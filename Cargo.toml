@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axfive-libzip = { path = "../axfive-libzip" }
+axfive-libzip = "0.2.1"
 chaste-types = "0.5.0"
 chaste-yarn = { version = "0.5.0", default-features = false, features = ["berry", "classic"] }
 chrono = { version = "0.4.40", default-features = false, features = ["std"] }

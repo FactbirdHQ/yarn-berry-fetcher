@@ -7,8 +7,7 @@
 
   outputs = { self, nixpkgs }: {
 
-    packages.aarch64-linux.hello = nixpkgs.legacyPackages.aarch64-linux.callPackage (
-
+    packages.aarch64-linux.yarn-zip-3 = nixpkgs.legacyPackages.aarch64-linux.callPackage (
       {
         rustPlatform,
         pkg-config,
@@ -27,7 +26,7 @@
 
         src = self;
 
-        cargoVendorDir = "";
+        cargoLock.lockFile = ./Cargo.lock;
 
         LIBZIP_SYS_USE_PKG_CONFIG = 1;
 
@@ -37,40 +36,23 @@
         ];
 
         buildInputs = [
-          ((libzip.override {
-            zlib = zlib-ng.override { withZlibCompat = true; };
-            /*.overrideAttrs (old: rec {
-              version = "2.1.2";
-              src = fetchFromGitHub {
-                owner = "zlib-ng";
-                repo = "zlib-ng";
-                rev = version;
-                hash = "sha256-6IEH9IQsBiNwfAZAemmP0/p6CTOzxEKyekciuH6pLhw=";
-              };
-            });*/
-          }).overrideAttrs rec {
-            #version = "1.8.0";
-            #src = fetchurl {
-            #  url = "https://libzip.org/download/libzip-${version}.tar.gz";
-            #  #url = "https://www.nih.at/libzip/libzip-${version}.tar.gz";
-            #  hash = "sha256-MO5VhowKaY08YASS8r6k62LFOEm89pbSGvXrZfPzg54=";
-            #};
+          (libzip.overrideAttrs rec {
             patches = libzip.patches ++ [
-              ./foo.patch /*
-              (fetchpatch {
-                url = "https://github.com/nih-at/libzip/commit/854a176cb512002e40cb2084d87dc3d6ea122c95.patch";
-                revert = true;
-                hash = "sha256-TccgEGsj8+ObT5/kU4eYGJ372BzNYBocEbExv3rwZLQ=";
-              })*/
+              ./libzip-revert-to-old-versionneeded-behavior.patch
             ];
           })
           openssl
         ];
       }
-
     ) {};
 
-    packages.aarch64-linux.default = self.packages.aarch64-linux.hello;
+    packages.aarch64-linux.yarn-zip-4 = self.packages.aarch64-linux.yarn-zip-3.override {
+      libzip = nixpkgs.legacyPackages.aarch64-linux.libzip.override {
+        zlib = nixpkgs.legacyPackages.aarch64-linux.zlib-ng.override { withZlibCompat = true; };
+      };
+    };
+
+    packages.aarch64-linux.default = self.packages.aarch64-linux.yarn-zip-4;
 
   };
 }

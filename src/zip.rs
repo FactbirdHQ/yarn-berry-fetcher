@@ -6,23 +6,20 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use chrono::DateTime;
-use deko::read::AnyDecoder;
-use dostime::DOSDateTime;
 use axfive_libzip::archive::{Archive as ZipArchive, OpenFlag};
 use axfive_libzip::file::{Compression, Encoding};
 use axfive_libzip::source::Source;
+use chrono::DateTime;
+use deko::read::AnyDecoder;
+use dostime::DOSDateTime;
+//use axfive_libzip::error::Zip as ZipError;
 
 // https://github.com/yarnpkg/berry/blob/e06bacdb8091b7a25fdb7911c3466184b94fa040/packages/yarnpkg-fslib/sources/constants.ts#L15
 const SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
     DOSDateTime::try_from(DateTime::from_timestamp(456789000, 0).unwrap().naive_utc()).unwrap()
 });
 
-fn add_ancestors(
-    zip: &mut ZipArchive,
-    included_directories: &mut HashSet<PathBuf>,
-    dir: &Path,
-) {
+fn add_ancestors(zip: &mut ZipArchive, included_directories: &mut HashSet<PathBuf>, dir: &Path) {
     if let Some(parent) = dir.parent() {
         add_ancestors(zip, included_directories, parent);
     }
@@ -43,10 +40,16 @@ fn add_ancestors(
         Encoding::Guess,
         Some(0o755),
         Some((*SAFE_TIME).into()),
-    ).unwrap();
+    )
+    .unwrap();
 }
 
-pub fn write_yarn_zip(package_name: &str, dst: PathBuf, source_stream: impl std::io::Read, compression: Option<u32>) {
+pub fn write_yarn_zip(
+    package_name: &str,
+    dst: PathBuf,
+    source_stream: impl std::io::Read,
+    compression: Option<u32>,
+) {
     let mut tar = tar::Archive::new(AnyDecoder::new(source_stream));
 
     let mut included_directories = HashSet::new();
@@ -92,7 +95,7 @@ pub fn write_yarn_zip(package_name: &str, dst: PathBuf, source_stream: impl std:
 
                 let src = Source::try_from(&buf[..]).unwrap();
                 let path = CString::new(path.into_os_string().into_vec()).unwrap();
-                zip.add(
+                let add_result = zip.add(
                     path,
                     src,
                     Encoding::Guess,
@@ -102,14 +105,24 @@ pub fn write_yarn_zip(package_name: &str, dst: PathBuf, source_stream: impl std:
                         Some(i) => Compression::Deflate(i),
                     },
                     //if level == 0 { Compression::Store } else { Compression::Default },
-                    Some(mode as u16 & 0o755
-                        | (if (mode & 0o111) != 0 { 0o111 } else { 0 })
-                        | (if (mode & 0o444) != 0 { 0o444 } else { 0 })
-                        ),
+                    Some(
+                        mode as u16 & 0o755
+                            | (if (mode & 0o111) != 0 { 0o111 } else { 0 })
+                            | (if (mode & 0o444) != 0 { 0o444 } else { 0 }),
+                    ),
                     Some((*SAFE_TIME).into()),
-                    true,
-                )
-                .unwrap();
+                    false,
+                );
+                if let Err(e) = add_result {
+                    match format!("{}", e).as_str() {
+                        "Error: File already exists" => {} // ignore
+                        _ => panic!("{}", e),
+                    }
+                    /*match &e.zip {
+                        Some(ZipError::Exists) => {}, // ignore
+                        _ => panic!("{}", e),
+                    }*/
+                }
             }
             tar::EntryType::Directory => {
                 if !included_directories.insert(path.to_owned()) {
@@ -123,7 +136,8 @@ pub fn write_yarn_zip(package_name: &str, dst: PathBuf, source_stream: impl std:
                     Encoding::Guess,
                     Some(0o755),
                     Some((*SAFE_TIME).into()),
-                ).unwrap();
+                )
+                .unwrap();
             }
             other => {
                 panic!("Unsupported tar entry: {:?} {:?}", path, other)
