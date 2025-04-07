@@ -4,15 +4,47 @@ use std::path::PathBuf;
 use std::collections::HashSet;
 
 use chaste_types::PackageSource;
+use serde::Deserialize;
 use sha2::{Sha512, Digest};
 use oxhttp::model::{Body, Request, StatusCode};
+
+#[derive(Debug)]
+struct CacheKey {
+    version: usize,
+    compression: Option<u32>,
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let lockfile_path = args.next().unwrap();
-    let lockfile = chaste_yarn::parse(lockfile_path).unwrap();
+    let lockfile = chaste_yarn::parse(&lockfile_path).unwrap();
     let client = oxhttp::Client::new();
     let mut hashes_done = HashSet::new();
+
+    let cache_version = {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LockfileMetadata {
+            cache_key: String,
+        }
+        #[derive(Deserialize)]
+        struct Lockfile {
+            __metadata: LockfileMetadata,
+        }
+
+        let lockfile_path = PathBuf::from(lockfile_path).join("yarn.lock");
+        let lockfile_contents = std::fs::read(&lockfile_path).unwrap();
+        let lockfile: Lockfile = serde_yml::from_slice(&lockfile_contents).unwrap();
+        let mut iter = lockfile.__metadata.cache_key.split('c');
+        let version_str = iter.next().unwrap();
+        let compression_str = iter.next();
+        CacheKey {
+            version: version_str.parse().unwrap(),
+            compression: compression_str.map(|c| c.parse().unwrap()),
+        }
+    };
+    println!("{:?}", cache_version);
+
     let packages = lockfile.packages()
         .into_iter()
         .filter_map(|package| {
@@ -55,7 +87,7 @@ fn main() {
         let hash_key = &expected_hash[..10]; // TODO figure out what this actually is
 
         let dst = PathBuf::from(format!("out/{}-npm-{}-{}-{}.zip", name.name_rest(), version, hash_key, cache_key));
-        zip::write_yarn_zip(&name_with_scope, dst.clone(), response.into_body());
+        zip::write_yarn_zip(&name_with_scope, dst.clone(), response.into_body(), cache_version.compression);
 
         let mut hasher = Sha512::new();
         let mut file = std::fs::File::open(dst).unwrap();

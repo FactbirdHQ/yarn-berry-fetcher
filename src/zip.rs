@@ -46,7 +46,7 @@ fn add_ancestors(
     ).unwrap();
 }
 
-pub fn write_yarn_zip(package_name: &str, dst: PathBuf, source_stream: impl std::io::Read) {
+pub fn write_yarn_zip(package_name: &str, dst: PathBuf, source_stream: impl std::io::Read, compression: Option<u32>) {
     let mut tar = tar::Archive::new(AnyDecoder::new(source_stream));
 
     let mut included_directories = HashSet::new();
@@ -96,7 +96,12 @@ pub fn write_yarn_zip(package_name: &str, dst: PathBuf, source_stream: impl std:
                     path,
                     src,
                     Encoding::Guess,
-                    Compression::Default,//if level == 0 { Compression::Store } else { Compression::Default },
+                    match compression {
+                        None => Compression::Default,
+                        Some(0) => Compression::Store,
+                        Some(i) => Compression::Deflate(i),
+                    },
+                    //if level == 0 { Compression::Store } else { Compression::Default },
                     Some(mode as u16 & 0o755
                         | (if (mode & 0o111) != 0 { 0o111 } else { 0 })
                         | (if (mode & 0o444) != 0 { 0o444 } else { 0 })
