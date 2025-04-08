@@ -47,8 +47,7 @@ fn main() {
             }
         }
         Some("post") => {
-            let lockfile_path = args.next().expect("yarn-zip post");
-            let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
+            let lockfile_contents = std::fs::read_to_string("yarn.lock").unwrap();
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
             let cache_path = std::env::var("offlineCache").unwrap();
             make_cache_writable(&cache_path);
