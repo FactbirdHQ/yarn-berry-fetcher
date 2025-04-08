@@ -120,22 +120,24 @@ fn main() {
 
                 let dst = PathBuf::from(format!(
                     "out/{}-npm-{}-{}-{}.zip",
-                    name.name_rest(),
+                    name.to_string().replace("/", "-"),
                     version,
                     &locator_hash[..10],
                     cache_key
                 ));
                 zip::write_yarn_zip(
-                    &name.to_string(),
+                    &format!("{}{}", name.scope_prefix().unwrap_or_default(), name.name_rest()),
                     dst.clone(),
                     response.into_body(),
                     cache_version.compression,
                 );
 
-                let mut hasher = Sha512::new();
-                let mut file = std::fs::File::open(dst).unwrap();
-                std::io::copy(&mut file, &mut hasher).unwrap();
-                let out_hash = hex::encode(hasher.finalize());
+                let out_hash = {
+                    let mut hasher = Sha512::new();
+                    let mut file = std::fs::File::open(&dst).unwrap();
+                    std::io::copy(&mut file, &mut hasher).unwrap();
+                    hex::encode(hasher.finalize())
+                };
                 if expected_hash == out_hash {
                     println!("Success:  {}", url);
                 } else {
