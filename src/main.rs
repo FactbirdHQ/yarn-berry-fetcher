@@ -57,15 +57,26 @@ fn main() {
         .into_iter()
         .filter_map(|package| {
             let Some((name, version)) = package.resolved.split_once("@npm:") else {
-                println!("Unsupported source {}, skipping...", package.resolved);
-                return None;
+                // Something other than npm
+
+                if let Some((_, patch)) = package.resolved.split_once("@patch:") {
+                    // These "builtin" patch dependencies (usually for PnP support)
+                    // can be handled offline by yarn at a later stage
+                    if patch.contains("#optional!builtin<compat/") {
+                        return None;
+                    }
+                }
+
+                println!("Unsupported source: {} (Hint: Git dependencies are not supported)", package.resolved);
+                std::process::exit(1);
             };
+            // We have an npm dependency
 
             let integrity = package.integrity.split("/").last().unwrap();
             match integrity.len() {
                 128 => {}
                 0 => {
-                    println!("No hash for package {} {}, skipping...", name, version);
+                    println!("Missing hash for package {} {}, skipping...", name, version);
                     return None;
                 }
                 len => {
