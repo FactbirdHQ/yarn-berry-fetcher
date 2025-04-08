@@ -13,7 +13,7 @@
         pkg-config,
         libzip,
         openssl,
-        YARN_ZIP_SUPPORTED_LOCKFILE_VERSION ? 8,
+        YARN_ZIP_SUPPORTED_CACHE_VERSION ? 8,
       }:
 
       rustPlatform.buildRustPackage {
@@ -22,10 +22,13 @@
 
         src = self;
 
-        cargoLock.lockFile = ./Cargo.lock;
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          allowBuiltinFetchGit = true;
+        };
 
         LIBZIP_SYS_USE_PKG_CONFIG = 1;
-        inherit YARN_ZIP_SUPPORTED_LOCKFILE_VERSION;
+        inherit YARN_ZIP_SUPPORTED_CACHE_VERSION;
 
         nativeBuildInputs = [
           rustPlatform.bindgenHook
@@ -47,7 +50,7 @@
       libzip = nixpkgs.legacyPackages.aarch64-linux.libzip.override {
         zlib = nixpkgs.legacyPackages.aarch64-linux.zlib-ng.override { withZlibCompat = true; };
       };
-      YARN_ZIP_SUPPORTED_LOCKFILE_VERSION = 10;
+      YARN_ZIP_SUPPORTED_CACHE_VERSION = 10;
     };
 
     packages.aarch64-linux.default = self.packages.aarch64-linux.yarn-zip-4;
