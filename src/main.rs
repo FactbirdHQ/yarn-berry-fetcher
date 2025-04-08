@@ -48,6 +48,9 @@ fn main() {
     let supported_version: usize = std::env!("YARN_ZIP_SUPPORTED_LOCKFILE_VERSION").parse().unwrap();
     assert_eq!(cache_version.version, supported_version);
 
+    let out_dir = std::env::var("out").unwrap();
+    std::fs::create_dir_all(&out_dir).unwrap();
+
     let packages = lockfile
         .packages()
         .into_iter()
@@ -113,17 +116,16 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                let cache_key = cache_version.version;
-
                 let ident_hash = hex::encode(Sha512::digest(format!("{}{}", name.scope_name().unwrap_or_default(), name.name_rest())));
                 let locator_hash = hex::encode(Sha512::digest(format!("{}npm:{}", ident_hash, version)));
 
                 let dst = PathBuf::from(format!(
-                    "out/{}-npm-{}-{}-{}.zip",
+                    "{}/{}-npm-{}-{}-{}.zip",
+                    out_dir,
                     name.to_string().replace("/", "-"),
                     version,
                     &locator_hash[..10],
-                    cache_key
+                    &expected_hash[..10]
                 ));
                 zip::write_yarn_zip(
                     &format!("{}{}", name.scope_prefix().unwrap_or_default(), name.name_rest()),
