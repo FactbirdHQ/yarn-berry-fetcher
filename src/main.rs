@@ -16,8 +16,35 @@ struct CacheKey {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let lockfile_path = args.next().expect("yarn-zip <project_dir>");
 
+    match args.next().as_deref() {
+        Some("generate") => {
+            let lockfile_path = args.next().expect("yarn-zip generate <yarn.lock>");
+            generate(&lockfile_path)
+        }
+        Some("convert") => {
+            let help = "yarn-zip generate <full package name> <package version> <expected sha512> <npm.tgz>";
+            match write_zip_and_check(
+                ".".into(),
+                &args.next().expect(help),
+                &args.next().expect(help),
+                &args.next().expect(help),
+                std::fs::File::open(args.next().expect(help)).unwrap(),
+                None,
+            ) {
+                Ok(out) => eprintln!("Wrote {:?}", out),
+                Err(_) => eprintln!("Hash mismatch"),
+            }
+        }
+        Some("post") => {}
+        _ => {
+            eprintln!("USAGE: yarn-zip <generate|convert|post> [options]");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn generate(lockfile_path: &str) {
     let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
     let cache_version = {
         #[derive(Deserialize)]
@@ -30,7 +57,8 @@ fn main() {
             __metadata: LockfileMetadata,
         }
 
-        let lockfile: Lockfile = serde_yml::from_str(&lockfile_contents).unwrap();
+        let lockfile: Lockfile = serde_yml::from_str(&lockfile_contents)
+            .expect("yarn.lock is not valid YAML. Are you trying to pass a yarn v1 lockfile?");
         let mut iter = lockfile.__metadata.cache_key.split('c');
         let version_str = iter.next().unwrap();
         let compression_str = iter.next();
@@ -70,7 +98,10 @@ fn main() {
                     return None;
                 }
 
-                println!("Unsupported source: {} (Hint: Git dependencies are not supported)", package.resolved);
+                println!(
+                    "Unsupported source: {} (Hint: Git dependencies are not supported)",
+                    package.resolved
+                );
                 std::process::exit(1);
             };
             // We have an npm dependency
@@ -115,8 +146,7 @@ fn main() {
         .panic_fuse()
         .map_init(oxhttp::Client::new, |client, (name, version, integrity)| {
             let unwind_result = std::panic::catch_unwind(|| {
-                let (scope_prefix, name_rest) = name.split_once("/").unwrap_or(("", name));
-                let scope_name = scope_prefix.strip_prefix("@");
+                let (_, name_rest) = name.split_once("/").unwrap_or(("", name));
 
                 let url = format!(
                     "https://registry.npmjs.org/{}/-/{}-{}.tgz",
@@ -132,42 +162,20 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                let ident_hash = hex::encode(Sha512::digest(format!(
-                    "{}{}",
-                    scope_name.unwrap_or_default(),
-                    name_rest
-                )));
-                let locator_hash =
-                    hex::encode(Sha512::digest(format!("{}npm:{}", ident_hash, version)));
-
-                let dst = PathBuf::from(format!(
-                    "{}/{}-npm-{}-{}-{}.zip",
-                    out_dir,
-                    name.replace("/", "-"),
-                    version,
-                    &locator_hash[..10],
-                    &integrity[..10]
-                ));
-                zip::write_yarn_zip(
+                if let Err(out_hash) = write_zip_and_check(
+                    &out_dir,
                     name,
-                    dst.clone(),
+                    version,
+                    integrity,
                     response.into_body(),
                     cache_version.compression,
-                );
-
-                let out_hash = {
-                    let mut hasher = Sha512::new();
-                    let mut file = std::fs::File::open(&dst).unwrap();
-                    std::io::copy(&mut file, &mut hasher).unwrap();
-                    hex::encode(hasher.finalize())
-                };
-                if integrity == out_hash {
-                    println!("Success:  {}", url);
-                } else {
+                ) {
                     println!("Fail:     {}", url);
                     println!("  expected: {}", integrity);
                     println!("  got:      {}", out_hash);
                     std::process::exit(1);
+                } else {
+                    println!("Success:  {}", url);
                 }
             });
             if unwind_result.is_err() {
@@ -177,4 +185,46 @@ fn main() {
         .count();
 
     assert_eq!(expected_cnt, cnt);
+}
+
+fn write_zip_and_check(
+    out_dir: &str,
+    package_name: &str,
+    version: &str,
+    integrity: &str,
+    source: impl std::io::Read,
+    compression: Option<u32>,
+) -> Result<PathBuf, String> {
+    let (scope_prefix, name_rest) = package_name.split_once("/").unwrap_or(("", package_name));
+    let scope_name = scope_prefix.strip_prefix("@");
+
+    let ident_hash = hex::encode(Sha512::digest(format!(
+        "{}{}",
+        scope_name.unwrap_or_default(),
+        name_rest
+    )));
+    let locator_hash = hex::encode(Sha512::digest(format!("{}npm:{}", ident_hash, version)));
+
+    let dst = PathBuf::from(format!(
+        "{}/{}-npm-{}-{}-{}.zip",
+        out_dir,
+        package_name.replace("/", "-"),
+        version,
+        &locator_hash[..10],
+        &integrity[..10]
+    ));
+    zip::write_yarn_zip(package_name, dst.clone(), source, compression);
+
+    let out_hash = {
+        let mut hasher = Sha512::new();
+        let mut file = std::fs::File::open(&dst).unwrap();
+        std::io::copy(&mut file, &mut hasher).unwrap();
+        hex::encode(hasher.finalize())
+    };
+
+    if integrity == out_hash {
+        Ok(dst)
+    } else {
+        Err(out_hash)
+    }
 }
