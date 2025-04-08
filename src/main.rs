@@ -54,11 +54,6 @@ fn main() {
         .filter_map(|package| {
             let version = package.version().unwrap();
             let name = package.name().unwrap();
-            let name_with_scope = format!(
-                "{}{}",
-                name.scope_prefix().unwrap_or_default(),
-                name.name_rest()
-            );
             match package.source() {
                 Some(PackageSource::Npm) => {
                     let (algo, expected_hash) = package.checksums().unwrap().integrity().to_hex();
@@ -81,7 +76,7 @@ fn main() {
                         return None;
                     }
 
-                    Some((version, name, name_with_scope, expected_hash))
+                    Some((version, name, expected_hash))
                 }
                 other => {
                     println!(
@@ -101,10 +96,10 @@ fn main() {
         .into_par_iter()
         .for_each_init(
             oxhttp::Client::new,
-            |client, (version, name, name_with_scope, expected_hash)| {
+            |client, (version, name, expected_hash)| {
                 let url = format!(
                     "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-                    name_with_scope,
+                    name,
                     name.name_rest(),
                     version
                 );
@@ -119,17 +114,19 @@ fn main() {
                 }
 
                 let cache_key = cache_version.version;
-                let hash_key = &expected_hash[..10]; // TODO figure out what this actually is
+
+                let ident_hash = hex::encode(Sha512::digest(format!("{}{}", name.scope_name().unwrap_or_default(), name.name_rest())));
+                let locator_hash = hex::encode(Sha512::digest(format!("{}npm:{}", ident_hash, version)));
 
                 let dst = PathBuf::from(format!(
                     "out/{}-npm-{}-{}-{}.zip",
                     name.name_rest(),
                     version,
-                    hash_key,
+                    &locator_hash[..10],
                     cache_key
                 ));
                 zip::write_yarn_zip(
-                    &name_with_scope,
+                    &name.to_string(),
                     dst.clone(),
                     response.into_body(),
                     cache_version.compression,
