@@ -62,9 +62,12 @@ fn main() {
                 if let Some((_, patch)) = package.resolved.split_once("@patch:") {
                     // These "builtin" patch dependencies (usually for PnP support)
                     // can be handled offline by yarn at a later stage
-                    if patch.contains("#optional!builtin<compat/") {
+                    if patch.contains("builtin<compat/") {
                         return None;
                     }
+                }
+                if package.resolved.contains("@workspace:") {
+                    return None;
                 }
 
                 println!("Unsupported source: {} (Hint: Git dependencies are not supported)", package.resolved);
