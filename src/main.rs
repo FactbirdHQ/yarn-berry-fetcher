@@ -36,11 +36,16 @@ fn main() {
                 out_dir: ".".into(),
                 compression: None,
             };
+            let package_name = args.next().expect(help);
+            let version = args.next().expect(help);
+            let expected_hash = args.next().expect(help);
             match cache.write_zip_and_check(
-                &args.next().expect(help),
-                &args.next().expect(help),
-                &args.next().expect(help),
+                &package_name,
+                "npm",
+                &format!("npm:{}", version),
+                &expected_hash,
                 std::fs::File::open(args.next().expect(help)).unwrap(),
+                false,
             ) {
                 Ok(out) => eprintln!("Wrote {:?}", out),
                 Err(_) => eprintln!("Hash mismatch"),
@@ -149,10 +154,9 @@ fn get_sources_from_lockfile(lockfile: Lockfile) -> Vec<Source> {
                     return None;
                 }
 
-                if let Some((name, url)) = package.resolved.split_once("@https:") {
+                if let Some((name, url_and_commit)) = package.resolved.split_once("@https:") {
                     let integrity = package.integrity.split("/").last().unwrap();
-                    let version = package.version;
-                    let Some((url, commit)) = url.split_once("#commit=") else {
+                    let Some((url, commit)) = url_and_commit.split_once("#commit=") else {
                         eprintln!("Git dependency without commit hash: {}", package.resolved);
                         std::process::exit(1);
                     };
@@ -175,7 +179,6 @@ fn get_sources_from_lockfile(lockfile: Lockfile) -> Vec<Source> {
                     let repo = format!("https:{}", url);
                     return Some(Source::Git {
                         name: name.into(),
-                        version: version.into(),
                         integrity: integrity.into(),
                         repo,
                         commit: commit.into(),
@@ -227,7 +230,6 @@ enum Source {
     },
     Git {
         name: String,
-        version: String,
         integrity: String,
         repo: String,
         commit: String,
@@ -307,9 +309,14 @@ impl Cache {
             std::process::exit(1);
         }
 
-        if let Err(out_hash) =
-            self.write_zip_and_check(&name, &version, &integrity, response.into_body())
-        {
+        if let Err(out_hash) = self.write_zip_and_check(
+            &name,
+            &format!("npm-{}", version),
+            &format!("npm:{}", version),
+            &integrity,
+            response.into_body(),
+            false,
+        ) {
             eprintln!("Fail:     {}", url);
             eprintln!("  expected: {}", integrity);
             eprintln!("  got:      {}", out_hash);
@@ -322,9 +329,11 @@ impl Cache {
     fn write_zip_and_check(
         &self,
         package_name: &str,
-        version: &str,
+        protocol: &str,
+        reference: &str,
         integrity: &str,
         source: impl std::io::Read,
+        ignore_hash: bool,
     ) -> Result<PathBuf, String> {
         let (scope_prefix, name_rest) = package_name.split_once("/").unwrap_or(("", package_name));
         let scope_name = scope_prefix.strip_prefix("@");
@@ -334,13 +343,13 @@ impl Cache {
             scope_name.unwrap_or_default(),
             name_rest
         )));
-        let locator_hash = hex::encode(Sha512::digest(format!("{}npm:{}", ident_hash, version)));
+        let locator_hash = hex::encode(Sha512::digest(format!("{}{}", ident_hash, reference)));
 
         let dst = PathBuf::from(format!(
-            "{}/{}-npm-{}-{}-{}.zip",
+            "{}/{}-{}-{}-{}.zip",
             self.out_dir,
             package_name.replace("/", "-"),
-            version,
+            protocol,
             &locator_hash[..10],
             &integrity[..10]
         ));
@@ -353,7 +362,7 @@ impl Cache {
             hex::encode(hasher.finalize())
         };
 
-        if integrity == out_hash {
+        if ignore_hash || integrity == out_hash {
             Ok(dst)
         } else {
             Err(out_hash)
@@ -365,28 +374,69 @@ impl Cache {
         for source in sources {
             let Source::Git {
                 name,
-                version,
                 integrity,
                 commit,
-                ..
+                repo,
             } = source
             else {
                 continue;
             };
 
+            /*
             let mut tar_proc = std::process::Command::new("tar")
                 .arg("--sort=name")
+                .arg("--exclude=.gitignore")
+                .arg("--exclude=package-lock.json")
+                .arg("--exclude=yarn.lock")
+                .arg("--exclude=pnpm-lock.yaml")
+                .arg("-c")
                 .arg("-C")
                 .arg(&format!(".yarn/cache/{}", commit))
                 .arg(".")
+                .stdout(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
+            */
 
-            self.write_zip_and_check(&name, &version, &integrity, tar_proc.stdout.take().unwrap())
-                .unwrap();
+            let package_tgz = if std::fs::exists(format!(".yarn/cache/{}/package-lock.json", commit)).unwrap() {
+                let pack_output = std::process::Command::new("npm")
+                    .arg("pack")
+                    .current_dir(&format!(".yarn/cache/{}", commit))
+                    .output()
+                    .unwrap();
+                if !pack_output.status.success() {
+                    eprintln!("{:?}", pack_output);
+                    std::process::exit(1);
+                }
+                format!(".yarn/cache/{}/{}", commit, String::from_utf8(pack_output.stdout).unwrap().trim())
+            } else {
+                std::fs::File::create(format!(".yarn/cache/{}/yarn.lock", commit)).unwrap();
+                let pack_output = std::process::Command::new("yarn")
+                    .arg("pack")
+                    .arg("--out")
+                    .arg("package.tgz")
+                    .current_dir(&format!(".yarn/cache/{}", commit))
+                    .output()
+                    .unwrap();
+                if !pack_output.status.success() {
+                    eprintln!("{:?}", pack_output);
+                    std::process::exit(1);
+                }
+                format!(".yarn/cache/{}/package.tgz", commit)
+            };
 
-            let tar_output = tar_proc.wait_with_output().unwrap();
-            assert!(tar_output.status.success());
+            self.write_zip_and_check(
+                &name,
+                "https",
+                &format!("{}#commit={}", repo, commit),
+                &integrity,
+                std::fs::File::open(package_tgz).unwrap(),
+                true,
+            )
+            .unwrap();
+
+            //let tar_output = tar_proc.wait_with_output().unwrap();
+            //assert!(tar_output.status.success());
         }
     }
 }
