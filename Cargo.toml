@@ -5,8 +5,6 @@ edition = "2024"
 
 [dependencies]
 axfive-libzip = "0.2.1"
-chaste-types = "0.5.0"
-chaste-yarn = { version = "0.5.0", default-features = false, features = ["berry", "classic"] }
 chrono = { version = "0.4.40", default-features = false, features = ["std"] }
 deko = { version = "0.4.0", default-features = false, features = ["flate2"] }
 dostime = { version = "1.0.0", features = ["chrono-1"] }
@@ -18,3 +16,4 @@ serde_yml = "0.0.12"
 sha2 = "0.10.8"
 ssri = "9.2.0"
 tar = "0.4.44"
+yarn-lock-parser = "0.11.0"

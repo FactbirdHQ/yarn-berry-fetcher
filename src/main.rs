@@ -3,9 +3,8 @@ mod zip;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use rayon::prelude::*;
-use chaste_types::PackageSource;
 use oxhttp::model::{Body, Request, StatusCode};
+use rayon::prelude::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
 
@@ -18,9 +17,8 @@ struct CacheKey {
 fn main() {
     let mut args = std::env::args().skip(1);
     let lockfile_path = args.next().expect("yarn-zip <project_dir>");
-    let lockfile = chaste_yarn::parse(&lockfile_path).unwrap();
-    let mut hashes_done = HashSet::new();
 
+    let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
     let cache_version = {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -32,9 +30,7 @@ fn main() {
             __metadata: LockfileMetadata,
         }
 
-        let lockfile_path = PathBuf::from(lockfile_path).join("yarn.lock");
-        let lockfile_contents = std::fs::read(&lockfile_path).unwrap();
-        let lockfile: Lockfile = serde_yml::from_slice(&lockfile_contents).unwrap();
+        let lockfile: Lockfile = serde_yml::from_str(&lockfile_contents).unwrap();
         let mut iter = lockfile.__metadata.cache_key.split('c');
         let version_str = iter.next().unwrap();
         let compression_str = iter.next();
@@ -43,68 +39,74 @@ fn main() {
             compression: compression_str.map(|c| c.parse().unwrap()),
         }
     };
+
     println!("{:?}", cache_version);
 
-    let supported_version: usize = std::env!("YARN_ZIP_SUPPORTED_LOCKFILE_VERSION").parse().unwrap();
+    let supported_version: usize = std::env!("YARN_ZIP_SUPPORTED_LOCKFILE_VERSION")
+        .parse()
+        .unwrap();
     assert_eq!(cache_version.version, supported_version);
 
-    let out_dir = std::env::var("out").unwrap();
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let lockfile = yarn_lock_parser::parse_str(&lockfile_contents).unwrap();
 
+    let out_dir = std::env::var("out").unwrap_or("out".into());
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let mut hashes_found = HashSet::new();
     let packages = lockfile
-        .packages()
+        .entries
         .into_iter()
         .filter_map(|package| {
-            let version = package.version().unwrap();
-            let name = package.name().unwrap();
-            match package.source() {
-                Some(PackageSource::Npm) => {
-                    let (algo, expected_hash) = package.checksums().unwrap().integrity().to_hex();
-                    if algo != ssri::Algorithm::Sha512 || expected_hash.len() != 128 {
-                        println!(
-                            "Bad hash length {} type {} for package {} {}, ignoring...",
-                            expected_hash.len(),
-                            algo,
-                            name.name_rest(),
-                            version
-                        );
-                        return None;
-                    }
-                    if !hashes_done.insert(expected_hash.clone()) {
-                        println!(
-                            "Duplicate package {} {}, ignoring...",
-                            name.name_rest(),
-                            version
-                        );
-                        return None;
-                    }
+            let Some((name, version)) = package.resolved.split_once("@npm:") else {
+                println!("Unsupported source {}, skipping...", package.resolved);
+                return None;
+            };
 
-                    Some((version, name, expected_hash))
+            let integrity = package.integrity.split("/").last().unwrap();
+            match integrity.len() {
+                128 => {}
+                0 => {
+                    println!("No hash for package {} {}, skipping...", name, version);
+                    return None;
                 }
-                other => {
+                len => {
                     println!(
-                        "Unsupported package source {:?} for package {} {}, skipping...",
-                        other,
-                        name.name_rest(),
-                        version
+                        "Bad hash length {} for package {} {}, skipping...",
+                        len, name, version
                     );
-                    None
+                    return None;
                 }
             }
+
+            if !hashes_found.insert(integrity) {
+                println!(
+                    "Duplicate integrity for package {} {}, skipping...",
+                    name, version
+                );
+                return None;
+            }
+
+            Some((name, version, integrity))
         })
         .collect::<Vec<_>>();
+    //println!("{:#?}", packages);
 
-    rayon::ThreadPoolBuilder::new().num_threads(20).build_global().unwrap();
-    packages
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(20)
+        .build_global()
+        .unwrap();
+
+    let expected_cnt = packages.len();
+    let cnt = packages
         .into_par_iter()
-        .for_each_init(
-            oxhttp::Client::new,
-            |client, (version, name, expected_hash)| {
+        .panic_fuse()
+        .map_init(oxhttp::Client::new, |client, (name, version, integrity)| {
+            let unwind_result = std::panic::catch_unwind(|| {
+                let (scope_prefix, name_rest) = name.split_once("/").unwrap_or(("", name));
+                let scope_name = scope_prefix.strip_prefix("@");
+
                 let url = format!(
                     "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-                    name,
-                    name.name_rest(),
-                    version
+                    name, name_rest, version
                 );
                 //println!("Fetching {}", url);
                 let response = client
@@ -116,19 +118,24 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                let ident_hash = hex::encode(Sha512::digest(format!("{}{}", name.scope_name().unwrap_or_default(), name.name_rest())));
-                let locator_hash = hex::encode(Sha512::digest(format!("{}npm:{}", ident_hash, version)));
+                let ident_hash = hex::encode(Sha512::digest(format!(
+                    "{}{}",
+                    scope_name.unwrap_or_default(),
+                    name_rest
+                )));
+                let locator_hash =
+                    hex::encode(Sha512::digest(format!("{}npm:{}", ident_hash, version)));
 
                 let dst = PathBuf::from(format!(
                     "{}/{}-npm-{}-{}-{}.zip",
                     out_dir,
-                    name.to_string().replace("/", "-"),
+                    name.replace("/", "-"),
                     version,
                     &locator_hash[..10],
-                    &expected_hash[..10]
+                    &integrity[..10]
                 ));
                 zip::write_yarn_zip(
-                    &format!("{}{}", name.scope_prefix().unwrap_or_default(), name.name_rest()),
+                    name,
                     dst.clone(),
                     response.into_body(),
                     cache_version.compression,
@@ -140,14 +147,20 @@ fn main() {
                     std::io::copy(&mut file, &mut hasher).unwrap();
                     hex::encode(hasher.finalize())
                 };
-                if expected_hash == out_hash {
+                if integrity == out_hash {
                     println!("Success:  {}", url);
                 } else {
                     println!("Fail:     {}", url);
-                    println!("  expected: {}", expected_hash);
+                    println!("  expected: {}", integrity);
                     println!("  got:      {}", out_hash);
                     std::process::exit(1);
                 }
+            });
+            if unwind_result.is_err() {
+                std::process::exit(1);
             }
-        );
+        })
+        .count();
+
+    assert_eq!(expected_cnt, cnt);
 }

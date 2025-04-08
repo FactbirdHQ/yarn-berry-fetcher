@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use axfive_libzip::archive::{Archive as ZipArchive, OpenFlag};
+use axfive_libzip::error::Zip as ZipError;
 use axfive_libzip::file::{Compression, Encoding};
 use axfive_libzip::source::Source;
 use chrono::DateTime;
 use deko::read::AnyDecoder;
 use dostime::DOSDateTime;
-//use axfive_libzip::error::Zip as ZipError;
 
 // https://github.com/yarnpkg/berry/blob/e06bacdb8091b7a25fdb7911c3466184b94fa040/packages/yarnpkg-fslib/sources/constants.ts#L15
 const SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
@@ -114,14 +114,10 @@ pub fn write_yarn_zip(
                     false,
                 );
                 if let Err(e) = add_result {
-                    match format!("{}", e).as_str() {
-                        "Error: File already exists" => {} // ignore
+                    match &e.zip {
+                        Some(ZipError::Exists) => {} // ignore
                         _ => panic!("{}", e),
                     }
-                    /*match &e.zip {
-                        Some(ZipError::Exists) => {}, // ignore
-                        _ => panic!("{}", e),
-                    }*/
                 }
             }
             tar::EntryType::Directory => {

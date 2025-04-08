@@ -31,9 +31,9 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 
 [[package]]
 name = "axfive-libzip"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc3f6dcb0b33fc09e1d85c86127b0838f2bc3f18fd30b626431938f06717100"
+checksum = "caa6578a9fec4556c87e2eac2d4e84ec67bb1e88a070cb6f81c4aa827a593952"
 dependencies = [
  "axfive-libzip-sys",
 ]
@@ -91,12 +91,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bytecount"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ce89b21cab1437276d2650d57e971f9d548a2d9037cc231abdc0562b97498ce"
-
-[[package]]
 name = "bytes"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -125,33 +119,6 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
-
-[[package]]
-name = "chaste-types"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ab20ebb4fcd8a070e67bd4f92fa1ba23db66e992b7a5a1fd8cc859b20318426"
-dependencies = [
- "nodejs-semver",
- "nom 8.0.0",
- "ssri",
- "thiserror 2.0.12",
-]
-
-[[package]]
-name = "chaste-yarn"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e4e5d0785709ec66af15575a645382ac031f70b1de347fa764d1fe5d7858179"
-dependencies = [
- "chaste-types",
- "nom 8.0.0",
- "serde",
- "serde_json",
- "thiserror 2.0.12",
- "yarn-lock-parser",
- "yarn-state",
-]
 
 [[package]]
 name = "chrono"
@@ -658,20 +625,8 @@ version = "5.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59bb584eaeeab6bd0226ccf3509a69d7936d148cf3d036ad350abe35e8c6856e"
 dependencies = [
- "miette-derive 5.10.0",
+ "miette-derive",
  "once_cell",
- "thiserror 1.0.69",
- "unicode-width",
-]
-
-[[package]]
-name = "miette"
-version = "7.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a955165f87b37fd1862df2a59547ac542c77ef6d17c666f619d1ad22dd89484"
-dependencies = [
- "cfg-if",
- "miette-derive 7.5.0",
  "thiserror 1.0.69",
  "unicode-width",
 ]
@@ -688,17 +643,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "miette-derive"
-version = "7.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf45bf44ab49be92fd1227a3be6fc6f617f1a337c06af54981048574d8783147"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -706,9 +650,9 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff70ce3e48ae43fa075863cef62e8b43b71a4f2382229920e0df362592919430"
+checksum = "3be647b768db090acb35d5ec5db2b0e1f1de11133ca123b9eacf5137868f892a"
 dependencies = [
  "adler2",
 ]
@@ -728,18 +672,6 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "nodejs-semver"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54a541e66989ad860689e1994447f22ab670d604068ed11376894ada03890c11"
-dependencies = [
- "bytecount",
- "miette 7.5.0",
- "thiserror 1.0.69",
- "winnow",
 ]
 
 [[package]]
@@ -909,9 +841,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.5.10"
+version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b8c0c260b63a8219631167be35e6a988e9554dbd323f8bd08439c8ed1302bd1"
+checksum = "d2f103c6d277498fbceb16e84d317e2a400f160f46904d5f5410848c829511a3"
 dependencies = [
  "bitflags",
 ]
@@ -1023,18 +955,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_json"
-version = "1.0.140"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20068b6e96dc6c9bd23e01df8827e6c7e1f2fddd43c21810382803c136b99373"
-dependencies = [
- "itoa",
- "memchr",
- "ryu",
- "serde",
-]
-
-[[package]]
 name = "serde_yml"
 version = "0.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1092,7 +1012,7 @@ dependencies = [
  "base64",
  "digest",
  "hex",
- "miette 5.10.0",
+ "miette",
  "serde",
  "sha-1",
  "sha2",
@@ -1338,15 +1258,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
-name = "winnow"
-version = "0.6.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e90edd2ac1aa278a5c4599b1d89cf03074b610800f866d4026dc199d7929a28"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "wit-bindgen-rt"
 version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1395,22 +1306,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "yarn-state"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e34b4584b1cd09ec28747a9af20b7a16eb288f1d9f2ffaff56fd0d28b8282a66"
-dependencies = [
- "nom 8.0.0",
- "thiserror 2.0.12",
-]
-
-[[package]]
 name = "yarn-zip"
 version = "0.1.0"
 dependencies = [
  "axfive-libzip",
- "chaste-types",
- "chaste-yarn",
  "chrono",
  "deko",
  "dostime",
@@ -1422,6 +1321,7 @@ dependencies = [
  "sha2",
  "ssri",
  "tar",
+ "yarn-lock-parser",
 ]
 
 [[package]]
