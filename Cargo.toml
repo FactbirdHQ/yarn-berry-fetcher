@@ -1,5 +1,5 @@
 [package]
-name = "yarn-zip"
+name = "yarn-berry-fetcher"
 version = "0.1.0"
 edition = "2024"
 

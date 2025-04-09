@@ -7,7 +7,7 @@
 
   outputs = { self, nixpkgs }: {
 
-    packages.aarch64-linux.yarn-zip-3 = nixpkgs.legacyPackages.aarch64-linux.callPackage (
+    packages.aarch64-linux.yarn-berry-3-fetcher = nixpkgs.legacyPackages.aarch64-linux.callPackage (
       {
         rustPlatform,
         pkg-config,
@@ -46,14 +46,14 @@
       }
     ) {};
 
-    packages.aarch64-linux.yarn-zip-4 = self.packages.aarch64-linux.yarn-zip-3.override {
+    packages.aarch64-linux.yarn-berry-4-fetcher = self.packages.aarch64-linux.yarn-berry-3-fetcher.override {
       libzip = nixpkgs.legacyPackages.aarch64-linux.libzip.override {
         zlib = nixpkgs.legacyPackages.aarch64-linux.zlib-ng.override { withZlibCompat = true; };
       };
       YARN_ZIP_SUPPORTED_CACHE_VERSION = 10;
     };
 
-    packages.aarch64-linux.default = self.packages.aarch64-linux.yarn-zip-4;
+    packages.aarch64-linux.default = self.packages.aarch64-linux.yarn-berry-4-fetcher;
 
   };
 }
