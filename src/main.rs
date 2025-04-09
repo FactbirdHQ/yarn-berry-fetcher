@@ -1,5 +1,4 @@
 mod fetch;
-mod post;
 mod zip;
 
 use std::collections::HashSet;
@@ -31,7 +30,7 @@ fn main() {
             cache.fetch(lockfile)
         }
         Some("convert") => {
-            let help = "yarn-zip generate <full package name> <package version> <expected sha512> <npm.tgz>";
+            let help = "yarn-zip convert <full package name> <package version> <expected sha512> <npm.tgz>";
             let cache = Cache {
                 out_dir: ".".into(),
                 compression: None,
@@ -50,19 +49,8 @@ fn main() {
                 Err(_) => eprintln!("Hash mismatch"),
             }
         }
-        Some("post") => {
-            let lockfile_contents = std::fs::read_to_string("yarn.lock").unwrap();
-            let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
-            let cache_path = std::env::var("offlineCache").unwrap();
-            post::make_cache_writable(&cache_path);
-            let cache = Cache {
-                out_dir: ".yarn/cache".into(),
-                compression: cache_version.compression,
-            };
-            cache.repack_git_deps(lockfile);
-        }
         _ => {
-            eprintln!("USAGE: yarn-zip <generate|convert|post> [options]");
+            eprintln!("USAGE: yarn-zip <fetch|convert> [options]");
             std::process::exit(1);
         }
     }
@@ -112,19 +100,16 @@ fn get_sources_from_lockfile(lockfile: Lockfile) -> Vec<Source> {
             let Some((name, version)) = package.resolved.split_once("@npm:") else {
                 // Something other than npm
 
-                if let Some((_, patch)) = package.resolved.split_once("@patch:") {
-                    // These "builtin" patch dependencies (usually for PnP support)
-                    // can be handled offline by yarn at a later stage
-                    if patch.contains("builtin<compat/") {
-                        return None;
-                    }
-                }
-                if package.resolved.contains("@workspace:") {
+                if package.resolved.contains("@workspace:")
+                    || package.resolved.contains("@patch:")
+                    || package.resolved.contains("@link:")
+                {
+                    // these dependencies can be handled offline by yarn at a later stage,
+                    // provided that all the sources have been fetched
                     return None;
                 }
 
-                if let Some((name, url_and_commit)) = package.resolved.split_once("@https:") {
-                    let integrity = package.integrity.split("/").last().unwrap();
+                if let Some((_name, url_and_commit)) = package.resolved.split_once("@https:") {
                     let Some((url, commit)) = url_and_commit.split_once("#commit=") else {
                         eprintln!("Git dependency without commit hash: {}", package.resolved);
                         std::process::exit(1);
@@ -147,8 +132,6 @@ fn get_sources_from_lockfile(lockfile: Lockfile) -> Vec<Source> {
 
                     let repo = format!("https:{}", url);
                     return Some(Source::Git {
-                        name: name.into(),
-                        integrity: integrity.into(),
                         repo,
                         commit: commit.into(),
                     });
@@ -198,8 +181,6 @@ enum Source {
         integrity: String,
     },
     Git {
-        name: String,
-        integrity: String,
         repo: String,
         commit: String,
     },
@@ -230,7 +211,7 @@ impl Cache {
         let locator_hash = hex::encode(Sha512::digest(format!("{}{}", ident_hash, reference)));
 
         let dst = PathBuf::from(format!(
-            "{}/{}-{}-{}-{}.zip",
+            "{}/cache/{}-{}-{}-{}.zip",
             self.out_dir,
             package_name.replace("/", "-"),
             protocol,

@@ -63,9 +63,7 @@ pub fn write_yarn_zip(
         path_iter.next();
         let path = path_iter.as_path();
         // strip "package/" and add "node_modules/{package_name}/"
-        let path = PathBuf::from("node_modules/")
-            .join(package_name)
-            .join(path);
+        let path = PathBuf::from("node_modules/").join(package_name).join(path);
 
         let header = entry.header();
         let mode = header.mode().unwrap();

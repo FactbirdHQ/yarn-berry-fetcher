@@ -9,7 +9,7 @@ impl Cache {
     pub fn fetch(&self, lockfile: Lockfile) {
         let sources = get_sources_from_lockfile(lockfile);
 
-        std::fs::create_dir_all(&self.out_dir).unwrap();
+        std::fs::create_dir_all(&PathBuf::from(&self.out_dir).join("cache")).unwrap();
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(20)
