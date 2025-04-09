@@ -27,8 +27,8 @@ fn main() {
                 out_dir: out_dir.clone(),
                 compression: cache_version.compression,
             };
+            cache.fetch(lockfile);
             std::fs::write(PathBuf::from(out_dir).join("yarn.lock"), &lockfile_contents).unwrap();
-            cache.fetch(lockfile)
         }
         Some("convert") => {
             let help = "yarn-zip convert <full package name> <package version> <expected sha512> <npm.tgz>";
