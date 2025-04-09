@@ -44,7 +44,7 @@ impl Cache {
             .arg(&repo)
             .arg(&commit)
             .arg("--out")
-            .arg(PathBuf::from(&self.out_dir).join(&commit))
+            .arg(PathBuf::from(&self.out_dir).join("checkouts").join(&commit))
             .output()
             .unwrap();
         assert!(output.status.success());

@@ -24,9 +24,10 @@ fn main() {
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
             let out_dir = std::env::var("out").unwrap_or("out".into());
             let cache = Cache {
-                out_dir,
+                out_dir: out_dir.clone(),
                 compression: cache_version.compression,
             };
+            std::fs::write(PathBuf::from(out_dir).join("yarn.lock"), &lockfile_contents).unwrap();
             cache.fetch(lockfile)
         }
         Some("convert") => {
