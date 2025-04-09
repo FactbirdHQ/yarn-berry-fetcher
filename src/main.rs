@@ -19,8 +19,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
 
     match args.next().as_deref() {
-        Some("generate") => {
-            let lockfile_path = args.next().expect("yarn-zip generate <yarn.lock>");
+        Some("fetch") => {
+            let lockfile_path = args.next().expect("yarn-zip fetch <yarn.lock>");
             let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
             let out_dir = std::env::var("out").unwrap_or("out".into());
@@ -28,7 +28,7 @@ fn main() {
                 out_dir,
                 compression: cache_version.compression,
             };
-            cache.generate(lockfile)
+            cache.fetch(lockfile)
         }
         Some("convert") => {
             let help = "yarn-zip generate <full package name> <package version> <expected sha512> <npm.tgz>";
@@ -249,7 +249,7 @@ struct Cache {
 }
 
 impl Cache {
-    fn generate(&self, lockfile: Lockfile) {
+    fn fetch(&self, lockfile: Lockfile) {
         let sources = get_sources_from_lockfile(lockfile);
 
         std::fs::create_dir_all(&self.out_dir).unwrap();
