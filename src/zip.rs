@@ -15,7 +15,7 @@ use deko::read::AnyDecoder;
 use dostime::DOSDateTime;
 
 // https://github.com/yarnpkg/berry/blob/e06bacdb8091b7a25fdb7911c3466184b94fa040/packages/yarnpkg-fslib/sources/constants.ts#L15
-const SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
+static SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
     DOSDateTime::try_from(DateTime::from_timestamp(456789000, 0).unwrap().naive_utc()).unwrap()
 });
 
@@ -64,7 +64,7 @@ pub fn write_yarn_zip(
         let path = path_iter.as_path();
         // strip "package/" and add "node_modules/{package_name}/"
         let path = PathBuf::from("node_modules/")
-            .join(&package_name)
+            .join(package_name)
             .join(path);
 
         let header = entry.header();

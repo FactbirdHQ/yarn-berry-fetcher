@@ -1,10 +1,10 @@
+mod fetch;
+mod post;
 mod zip;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use oxhttp::model::{Body, Request, StatusCode};
-use rayon::prelude::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
@@ -54,7 +54,7 @@ fn main() {
             let lockfile_contents = std::fs::read_to_string("yarn.lock").unwrap();
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
             let cache_path = std::env::var("offlineCache").unwrap();
-            make_cache_writable(&cache_path);
+            post::make_cache_writable(&cache_path);
             let cache = Cache {
                 out_dir: ".yarn/cache".into(),
                 compression: cache_version.compression,
@@ -66,44 +66,6 @@ fn main() {
             std::process::exit(1);
         }
     }
-}
-
-fn make_cache_writable(cache_dir: &str) {
-    assert!(
-        std::process::Command::new("rm")
-            .arg("-rf")
-            .arg(".yarn/cache")
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        std::process::Command::new("mkdir")
-            .arg("-p")
-            .arg(".yarn")
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        std::process::Command::new("cp")
-            .arg("-R")
-            .arg("--reflink=auto")
-            .arg(cache_dir)
-            .arg(".yarn/cache")
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        std::process::Command::new("chmod")
-            .arg("-R")
-            .arg("u+w")
-            .arg(".yarn/cache")
-            .status()
-            .unwrap()
-            .success()
-    );
 }
 
 fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
@@ -118,7 +80,7 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
             __metadata: LockfileMetadata,
         }
 
-        let lockfile: Lockfile = serde_yml::from_str(&lockfile_contents)
+        let lockfile: Lockfile = serde_yml::from_str(lockfile_contents)
             .expect("yarn.lock is not valid YAML. Are you trying to pass a yarn v1 lockfile?");
         let mut iter = lockfile.__metadata.cache_key.split('c');
         let version_str = iter.next().unwrap();
@@ -136,7 +98,7 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
         .unwrap();
     assert_eq!(cache_version.version, supported_version);
 
-    let lockfile = yarn_lock_parser::parse_str(&lockfile_contents).unwrap();
+    let lockfile = yarn_lock_parser::parse_str(lockfile_contents).unwrap();
 
     (cache_version, lockfile)
 }
@@ -249,89 +211,6 @@ struct Cache {
 }
 
 impl Cache {
-    fn fetch(&self, lockfile: Lockfile) {
-        let sources = get_sources_from_lockfile(lockfile);
-
-        std::fs::create_dir_all(&self.out_dir).unwrap();
-
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(20)
-            .build_global()
-            .unwrap();
-
-        sources.into_par_iter().panic_fuse().for_each_init(
-            oxhttp::Client::new,
-            |client, source| {
-                let unwind_result = std::panic::catch_unwind(|| self.fetch_source(&client, source));
-                if unwind_result.is_err() {
-                    std::process::exit(1);
-                }
-            },
-        );
-    }
-
-    fn fetch_source(&self, client: &oxhttp::Client, source: Source) {
-        match source {
-            Source::Npm {
-                name,
-                version,
-                integrity,
-            } => self.fetch_npm_and_write_zip(client, name, version, integrity),
-            Source::Git { repo, commit, .. } => self.fetch_git(repo, commit),
-        }
-    }
-
-    fn fetch_git(&self, repo: String, commit: String) {
-        let output = std::process::Command::new("nix-prefetch-git")
-            .arg("--builder")
-            .arg(&repo)
-            .arg(&commit)
-            .arg("--out")
-            .arg(PathBuf::from(&self.out_dir).join(&commit))
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        eprintln!("Success:  git+{}#commit={}", repo, commit);
-    }
-
-    fn fetch_npm_and_write_zip(
-        &self,
-        client: &oxhttp::Client,
-        name: String,
-        version: String,
-        integrity: String,
-    ) {
-        let (_, name_rest) = name.split_once("/").unwrap_or(("", &name));
-
-        let url = format!(
-            "https://registry.npmjs.org/{}/-/{}-{}.tgz",
-            name, name_rest, version
-        );
-        let response = client
-            .request(Request::builder().uri(&url).body(Body::empty()).unwrap())
-            .unwrap();
-
-        if response.status() != StatusCode::OK {
-            eprintln!("Failed to fetch {}: {}", url, response.status());
-            std::process::exit(1);
-        }
-
-        if let Err(out_hash) = self.write_zip_and_check(
-            &name,
-            &format!("npm-{}", version),
-            &format!("npm:{}", version),
-            &integrity,
-            response.into_body(),
-        ) {
-            eprintln!("Fail:     {}", url);
-            eprintln!("  expected: {}", integrity);
-            eprintln!("  got:      {}", out_hash);
-            std::process::exit(1);
-        } else {
-            eprintln!("Success:  {}", url);
-        }
-    }
-
     fn write_zip_and_check(
         &self,
         package_name: &str,
@@ -371,76 +250,6 @@ impl Cache {
             Ok(dst)
         } else {
             Err(out_hash)
-        }
-    }
-
-    fn repack_git_deps(&self, lockfile: Lockfile) {
-        let sources = get_sources_from_lockfile(lockfile);
-        for source in sources {
-            let Source::Git {
-                name,
-                integrity,
-                commit,
-                repo,
-            } = source
-            else {
-                continue;
-            };
-
-            /*
-            let mut tar_proc = std::process::Command::new("tar")
-                .arg("--sort=name")
-                .arg("--exclude=.gitignore")
-                .arg("--exclude=package-lock.json")
-                .arg("--exclude=yarn.lock")
-                .arg("--exclude=pnpm-lock.yaml")
-                .arg("-c")
-                .arg("-C")
-                .arg(&format!(".yarn/cache/{}", commit))
-                .arg(".")
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            */
-
-            let package_tgz = if std::fs::exists(format!(".yarn/cache/{}/package-lock.json", commit)).unwrap() {
-                let pack_output = std::process::Command::new("npm")
-                    .arg("pack")
-                    .current_dir(&format!(".yarn/cache/{}", commit))
-                    .output()
-                    .unwrap();
-                if !pack_output.status.success() {
-                    eprintln!("{:?}", pack_output);
-                    std::process::exit(1);
-                }
-                format!(".yarn/cache/{}/{}", commit, String::from_utf8(pack_output.stdout).unwrap().trim())
-            } else {
-                std::fs::File::create(format!(".yarn/cache/{}/yarn.lock", commit)).unwrap();
-                let pack_output = std::process::Command::new("yarn")
-                    .arg("pack")
-                    .arg("--out")
-                    .arg("package.tgz")
-                    .current_dir(&format!(".yarn/cache/{}", commit))
-                    .output()
-                    .unwrap();
-                if !pack_output.status.success() {
-                    eprintln!("{:?}", pack_output);
-                    std::process::exit(1);
-                }
-                format!(".yarn/cache/{}/package.tgz", commit)
-            };
-
-            self.write_zip_and_check(
-                &name,
-                "https",
-                &format!("{}#commit={}", repo, commit),
-                &integrity,
-                std::fs::File::open(package_tgz).unwrap(),
-            )
-            .unwrap();
-
-            //let tar_output = tar_proc.wait_with_output().unwrap();
-            //assert!(tar_output.status.success());
         }
     }
 }
