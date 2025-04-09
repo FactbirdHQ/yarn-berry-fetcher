@@ -45,7 +45,6 @@ fn main() {
                 &format!("npm:{}", version),
                 &expected_hash,
                 std::fs::File::open(args.next().expect(help)).unwrap(),
-                false,
             ) {
                 Ok(out) => eprintln!("Wrote {:?}", out),
                 Err(_) => eprintln!("Hash mismatch"),
@@ -315,7 +314,6 @@ impl Cache {
             &format!("npm:{}", version),
             &integrity,
             response.into_body(),
-            false,
         ) {
             eprintln!("Fail:     {}", url);
             eprintln!("  expected: {}", integrity);
@@ -333,7 +331,6 @@ impl Cache {
         reference: &str,
         integrity: &str,
         source: impl std::io::Read,
-        ignore_hash: bool,
     ) -> Result<PathBuf, String> {
         let (scope_prefix, name_rest) = package_name.split_once("/").unwrap_or(("", package_name));
         let scope_name = scope_prefix.strip_prefix("@");
@@ -362,7 +359,7 @@ impl Cache {
             hex::encode(hasher.finalize())
         };
 
-        if ignore_hash || integrity == out_hash {
+        if integrity == out_hash {
             Ok(dst)
         } else {
             Err(out_hash)
@@ -431,7 +428,6 @@ impl Cache {
                 &format!("{}#commit={}", repo, commit),
                 &integrity,
                 std::fs::File::open(package_tgz).unwrap(),
-                true,
             )
             .unwrap();
 
