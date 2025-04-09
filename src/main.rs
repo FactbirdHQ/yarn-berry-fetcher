@@ -78,6 +78,14 @@ fn make_cache_writable(cache_dir: &str) {
             .success()
     );
     assert!(
+        std::process::Command::new("mkdir")
+            .arg("-p")
+            .arg(".yarn")
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
         std::process::Command::new("cp")
             .arg("-R")
             .arg("--reflink=auto")
