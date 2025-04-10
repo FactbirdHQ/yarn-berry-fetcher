@@ -12,9 +12,9 @@ impl Cache {
             .into_iter()
             .filter(EntryExt::is_real_source)
             .map(|entry| {
-                let source = SourceWithIntegrity::try_from(&entry)
-                    .map_err(|_| "Missing integrity")
-                    .unwrap();
+                let Ok(source) = SourceWithIntegrity::try_from(&entry) else {
+                    panic!("Missing integrity {}", entry.resolved);
+                };
                 (entry, source)
             })
             .collect::<Vec<_>>();

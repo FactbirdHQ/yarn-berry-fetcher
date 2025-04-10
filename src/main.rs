@@ -109,7 +109,12 @@ trait EntryExt {
 
 impl EntryExt for yarn_lock_parser::Entry<'_> {
     fn name(&self) -> &str {
-        self.resolved.rsplit_once("@").unwrap().0
+        if self.resolved.starts_with("@") {
+            let second_at = self.resolved[1..].find("@").unwrap() + 1;
+            &self.resolved[..second_at]
+        } else {
+            self.resolved.split_once("@").unwrap().0
+        }
     }
 
     fn name_rest(&self) -> &str {
@@ -129,7 +134,12 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     }
 
     fn resolution(&self) -> &str {
-        self.resolved.rsplit_once("@").unwrap().1
+        if self.resolved.starts_with("@") {
+            let second_at = self.resolved[1..].find("@").unwrap() + 1;
+            &self.resolved[second_at+1..]
+        } else {
+            self.resolved.split_once("@").unwrap().1
+        }
     }
 
     fn protocol(&self) -> &str {
@@ -208,10 +218,12 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     fn slug(&self) -> String {
         let mut slug = "".to_string();
         slug.push_str(&self.name().replace("/", "-"));
+        slug.push_str("-");
+        slug.push_str(&self.protocol());
         let selector = self.selector();
         if semver::Version::parse(selector).is_ok() {
-            slug.push_str(selector);
             slug.push_str("-");
+            slug.push_str(selector);
         }
         slug
     }
