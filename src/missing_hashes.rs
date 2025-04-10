@@ -57,6 +57,7 @@ fn add_integrity(
         eprintln!("Failed to fetch {}: {}", url, response.status());
         std::process::exit(1);
     }
+    eprintln!("Success:  {}", url);
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let dst = tmp_dir.path().join("out.zip");
