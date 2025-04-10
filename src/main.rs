@@ -1,6 +1,6 @@
 mod fetch;
-mod zip;
 mod missing_hashes;
+mod zip;
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -26,7 +26,10 @@ fn main() {
 
     match args.next().as_deref() {
         Some("fetch") => {
-            let lockfile_path = args.next().expect("yarn-zip fetch <yarn.lock>");
+            let lockfile_path = args
+                .next()
+                .expect("yarn-zip fetch <yarn.lock> [missing-hashes.json]");
+            let missing_hashes_path = args.next();
             let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
             let out_dir = std::env::var("out").unwrap_or("out".into());
@@ -35,8 +38,19 @@ fn main() {
                 key: cache_version,
                 is_global: false,
             };
-            cache.fetch(lockfile);
-            std::fs::write(PathBuf::from(out_dir).join("yarn.lock"), &lockfile_contents).unwrap();
+            cache.fetch(lockfile, missing_hashes_path.as_deref());
+            std::fs::write(
+                PathBuf::from(&out_dir).join("yarn.lock"),
+                &lockfile_contents,
+            )
+            .unwrap();
+            if let Some(missing_hashes_path) = missing_hashes_path {
+                std::fs::copy(
+                    missing_hashes_path,
+                    PathBuf::from(&out_dir).join("missing-hashes.json"),
+                )
+                .unwrap();
+            }
         }
         Some("missing-hashes") => {
             let lockfile_path = args.next().expect("yarn-zip fetch <yarn.lock>");
@@ -147,7 +161,7 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     fn resolution(&self) -> &str {
         if self.resolved.starts_with("@") {
             let second_at = self.resolved[1..].find("@").unwrap() + 1;
-            &self.resolved[second_at+1..]
+            &self.resolved[second_at + 1..]
         } else {
             self.resolved.split_once("@").unwrap().1
         }
@@ -301,7 +315,7 @@ struct Cache {
 }
 
 impl Cache {
-    fn zip_name(&self, entry: &yarn_lock_parser::Entry) -> String {
+    fn zip_name(&self, entry: &yarn_lock_parser::Entry, integrity: &str) -> String {
         let ident_hash = hex::encode(Sha512::digest(format!(
             "{}{}",
             entry.scope_name().unwrap_or_default(),
@@ -320,7 +334,7 @@ impl Cache {
             if self.is_global {
                 self.key.version.to_string()
             } else {
-                entry.integrity_sha512().unwrap()[..10].to_string()
+                integrity[..10].to_string()
             },
         )
     }
@@ -331,7 +345,11 @@ impl Cache {
         integrity: &str,
         source: impl std::io::Read,
     ) -> Result<PathBuf, String> {
-        let dst = PathBuf::from(format!("{}/cache/{}", self.out_dir, self.zip_name(&entry)));
+        let dst = PathBuf::from(format!(
+            "{}/cache/{}",
+            self.out_dir,
+            self.zip_name(&entry, integrity)
+        ));
         zip::write_yarn_zip(entry.name(), dst.clone(), source, self.key.compression);
 
         let out_hash = {

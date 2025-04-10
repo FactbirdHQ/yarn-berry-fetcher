@@ -1,23 +1,43 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity};
+use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity};
 
 use oxhttp::model::{Body, Request, StatusCode};
 use rayon::prelude::*;
 
 impl Cache {
-    pub fn fetch(&self, lockfile: Lockfile) {
+    pub fn fetch(&self, lockfile: Lockfile, missing_hashes_path: Option<&str>) {
+        let mut missing_hashes: HashMap<String, String> = missing_hashes_path
+            .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+            .unwrap_or_default();
+
         let sources = lockfile
             .entries
             .into_iter()
             .filter(EntryExt::is_real_source)
             .map(|entry| {
-                let Ok(source) = SourceWithIntegrity::try_from(&entry) else {
-                    panic!("Missing integrity {}", entry.resolved);
+                let source = match SourceWithIntegrity::try_from(&entry) {
+                    Ok(source) => source,
+                    Err(missing_integrity) => {
+                        let SourceWithoutIntegrity::Tgz { url } = missing_integrity;
+                        let integrity = missing_hashes
+                            .remove(entry.resolved)
+                            .expect("Outdated missing-hashes.json");
+                        assert_eq!(
+                            integrity.len(),
+                            128,
+                            "Invalid length for sha512 integrity in missing-hashes.json {}",
+                            entry.resolved
+                        );
+                        SourceWithIntegrity::Tgz { url, integrity }
+                    }
                 };
                 (entry, source)
             })
             .collect::<Vec<_>>();
+
+        assert!(missing_hashes.is_empty(), "Missing hashes must be used");
 
         std::fs::create_dir_all(&PathBuf::from(&self.out_dir).join("cache")).unwrap();
 
