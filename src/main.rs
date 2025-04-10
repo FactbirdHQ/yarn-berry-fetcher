@@ -130,6 +130,7 @@ pub trait EntryExt {
     fn git_commit(&self) -> Option<&str>;
     fn integrity_sha512(&self) -> Option<&str>;
     fn slug(&self) -> String;
+    fn is_content_addressed(&self) -> bool;
 }
 
 impl EntryExt for yarn_lock_parser::Entry<'_> {
@@ -252,6 +253,10 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
         }
         slug
     }
+
+    fn is_content_addressed(&self) -> bool {
+        self.integrity.len() != 0
+    }
 }
 
 // Panics if we don't know how to fetch the source (even with added integrity data)
@@ -331,7 +336,7 @@ impl Cache {
             "{}-{}-{}.zip",
             entry.slug(),
             &locator_hash[..10],
-            if self.is_global {
+            if self.is_global || !entry.is_content_addressed() {
                 self.key.version.to_string()
             } else {
                 integrity[..10].to_string()
