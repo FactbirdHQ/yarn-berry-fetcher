@@ -961,6 +961,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.140"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20068b6e96dc6c9bd23e01df8827e6c7e1f2fddd43c21810382803c136b99373"
+dependencies = [
+ "itoa",
+ "memchr",
+ "ryu",
+ "serde",
+]
+
+[[package]]
 name = "serde_yml"
 version = "0.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1313,10 +1325,12 @@ dependencies = [
  "rayon",
  "semver",
  "serde",
+ "serde_json",
  "serde_yml",
  "sha2",
  "ssri",
  "tar",
+ "tempfile",
  "yarn-lock-parser",
 ]
 

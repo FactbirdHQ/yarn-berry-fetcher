@@ -1,5 +1,6 @@
 mod fetch;
 mod zip;
+mod missing_hashes;
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -37,6 +38,15 @@ fn main() {
             cache.fetch(lockfile);
             std::fs::write(PathBuf::from(out_dir).join("yarn.lock"), &lockfile_contents).unwrap();
         }
+        Some("missing-hashes") => {
+            let lockfile_path = args.next().expect("yarn-zip fetch <yarn.lock>");
+            let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
+            let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
+
+            let missing_hashes = missing_hashes::get_missing_hashes(lockfile, cache_version);
+
+            println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
+        }
         Some("convert") => {
             let help = "yarn-zip convert <full package name> <package version> <npm.tgz>";
             let package_name = args.next().expect(help);
@@ -46,9 +56,10 @@ fn main() {
                 std::fs::File::open(args.next().expect(help)).unwrap(),
                 None,
             );
+            eprintln!("wrote out.zip");
         }
         _ => {
-            eprintln!("USAGE: yarn-zip <fetch|convert> [options]");
+            eprintln!("USAGE: yarn-zip <fetch|convert|missing-hashes> [options]");
             std::process::exit(1);
         }
     }
@@ -86,7 +97,7 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
     (cache_version, lockfile)
 }
 
-trait EntryExt {
+pub trait EntryExt {
     fn name(&self) -> &str;
     fn name_rest(&self) -> &str;
     fn scope(&self) -> Option<&str>;
@@ -273,6 +284,7 @@ impl TryFrom<&yarn_lock_parser::Entry<'_>> for SourceWithIntegrity {
     }
 }
 
+#[derive(Debug)]
 enum SourceWithoutIntegrity {
     Tgz { url: String },
 }
@@ -319,7 +331,7 @@ impl Cache {
         integrity: &str,
         source: impl std::io::Read,
     ) -> Result<PathBuf, String> {
-        let dst = PathBuf::from(format!("{}/cache/{}", self.out_dir, self.zip_name(&entry),));
+        let dst = PathBuf::from(format!("{}/cache/{}", self.out_dir, self.zip_name(&entry)));
         zip::write_yarn_zip(entry.name(), dst.clone(), source, self.key.compression);
 
         let out_hash = {
