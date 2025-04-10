@@ -39,7 +39,7 @@ impl Cache {
 
         assert!(missing_hashes.is_empty(), "Missing hashes must be used");
 
-        std::fs::create_dir_all(&PathBuf::from(&self.out_dir).join("cache")).unwrap();
+        std::fs::create_dir_all(PathBuf::from(&self.out_dir).join("cache")).unwrap();
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(20)

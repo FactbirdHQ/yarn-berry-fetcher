@@ -36,9 +36,8 @@ pub fn get_missing_hashes(lockfile: Lockfile, cache_key: CacheKey) -> BTreeMap<S
             }
         })
         .collect::<Vec<_>>();
-    let x = x.into_iter().collect::<BTreeMap<_, _>>();
 
-    x
+    x.into_iter().collect::<BTreeMap<_, _>>()
 }
 
 fn add_integrity(
@@ -62,7 +61,7 @@ fn add_integrity(
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let dst = tmp_dir.path().join("out.zip");
     zip::write_yarn_zip(
-        &entry.name(),
+        entry.name(),
         dst.clone(),
         response.into_body(),
         compression,

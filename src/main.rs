@@ -2,7 +2,7 @@ mod fetch;
 mod missing_hashes;
 mod zip;
 
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
@@ -21,6 +21,29 @@ static SUPPORTED_CACHE_VERSION: LazyLock<usize> = LazyLock::new(|| {
         .unwrap()
 });
 
+fn fetch(lockfile_path: &str, missing_hashes_path: Option<&str>, out_dir: &Path) {
+    let lockfile_contents = std::fs::read_to_string(lockfile_path).unwrap();
+    let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
+    let cache = Cache {
+        out_dir: out_dir.to_owned(),
+        key: cache_version,
+        is_global: false,
+    };
+    cache.fetch(lockfile, missing_hashes_path);
+    std::fs::write(
+        out_dir.join("yarn.lock"),
+        &lockfile_contents,
+    )
+    .unwrap();
+    if let Some(missing_hashes_path) = missing_hashes_path {
+        std::fs::copy(
+            missing_hashes_path,
+            PathBuf::from(&out_dir).join("missing-hashes.json"),
+        )
+        .unwrap();
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
 
@@ -30,27 +53,28 @@ fn main() {
                 .next()
                 .expect("yarn-zip fetch <yarn.lock> [missing-hashes.json]");
             let missing_hashes_path = args.next();
-            let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
-            let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
-            let out_dir = std::env::var("out").unwrap_or("out".into());
-            let cache = Cache {
-                out_dir: out_dir.clone(),
-                key: cache_version,
-                is_global: false,
-            };
-            cache.fetch(lockfile, missing_hashes_path.as_deref());
-            std::fs::write(
-                PathBuf::from(&out_dir).join("yarn.lock"),
-                &lockfile_contents,
-            )
-            .unwrap();
-            if let Some(missing_hashes_path) = missing_hashes_path {
-                std::fs::copy(
-                    missing_hashes_path,
-                    PathBuf::from(&out_dir).join("missing-hashes.json"),
-                )
+            let out_dir = PathBuf::from(std::env::var("out").unwrap_or("out".into()));
+            fetch(&lockfile_path, missing_hashes_path.as_deref(), &out_dir)
+        }
+        Some("prefetch") => {
+            let lockfile_path = args
+                .next()
+                .expect("yarn-zip prefetch <yarn.lock> [missing-hashes.json]");
+            let missing_hashes_path = args.next();
+            let tmp_dir = tempfile::TempDir::new().unwrap();
+            fetch(&lockfile_path, missing_hashes_path.as_deref(), tmp_dir.path());
+
+            let output = std::process::Command::new("nix-hash")
+                .arg("--type")
+                .arg("sha256")
+                .arg("--sri")
+                .arg(tmp_dir.path())
+                .output()
                 .unwrap();
-            }
+            assert!(output.status.success(), "nix-hash errored: {}", String::from_utf8_lossy(&output.stderr));
+
+            tmp_dir.close().unwrap();
+            println!("{}", String::from_utf8_lossy(&output.stdout));
         }
         Some("missing-hashes") => {
             let lockfile_path = args.next().expect("yarn-zip fetch <yarn.lock>");
@@ -233,7 +257,7 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
 
     fn integrity_sha512(&self) -> Option<&str> {
         let integrity = self.integrity.split("/").last().unwrap();
-        if integrity.len() == 0 {
+        if integrity.is_empty() {
             None
         } else {
             assert_eq!(integrity.len(), 128);
@@ -244,18 +268,18 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     fn slug(&self) -> String {
         let mut slug = "".to_string();
         slug.push_str(&self.name().replace("/", "-"));
-        slug.push_str("-");
-        slug.push_str(&self.protocol());
+        slug.push('-');
+        slug.push_str(self.protocol());
         let selector = self.selector();
         if semver::Version::parse(selector).is_ok() {
-            slug.push_str("-");
+            slug.push('-');
             slug.push_str(selector);
         }
         slug
     }
 
     fn is_content_addressed(&self) -> bool {
-        self.integrity.len() != 0
+        !self.integrity.is_empty()
     }
 }
 
@@ -314,7 +338,7 @@ enum SourceWithIntegrity {
 }
 
 struct Cache {
-    out_dir: String,
+    out_dir: PathBuf,
     key: CacheKey,
     is_global: bool,
 }
@@ -350,11 +374,7 @@ impl Cache {
         integrity: &str,
         source: impl std::io::Read,
     ) -> Result<PathBuf, String> {
-        let dst = PathBuf::from(format!(
-            "{}/cache/{}",
-            self.out_dir,
-            self.zip_name(&entry, integrity)
-        ));
+        let dst = self.out_dir.join("cache").join(self.zip_name(&entry, integrity));
         zip::write_yarn_zip(entry.name(), dst.clone(), source, self.key.compression);
 
         let out_hash = {
