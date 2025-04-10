@@ -1,8 +1,8 @@
 mod fetch;
 mod zip;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
@@ -13,6 +13,12 @@ struct CacheKey {
     version: usize,
     compression: Option<u32>,
 }
+
+static SUPPORTED_CACHE_VERSION: LazyLock<usize> = LazyLock::new(|| {
+    std::env!("YARN_ZIP_SUPPORTED_CACHE_VERSION")
+        .parse()
+        .unwrap()
+});
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -25,30 +31,21 @@ fn main() {
             let out_dir = std::env::var("out").unwrap_or("out".into());
             let cache = Cache {
                 out_dir: out_dir.clone(),
-                compression: cache_version.compression,
+                key: cache_version,
+                is_global: false,
             };
             cache.fetch(lockfile);
             std::fs::write(PathBuf::from(out_dir).join("yarn.lock"), &lockfile_contents).unwrap();
         }
         Some("convert") => {
-            let help = "yarn-zip convert <full package name> <package version> <expected sha512> <npm.tgz>";
-            let cache = Cache {
-                out_dir: ".".into(),
-                compression: None,
-            };
+            let help = "yarn-zip convert <full package name> <package version> <npm.tgz>";
             let package_name = args.next().expect(help);
-            let version = args.next().expect(help);
-            let expected_hash = args.next().expect(help);
-            match cache.write_zip_and_check(
+            zip::write_yarn_zip(
                 &package_name,
-                "npm",
-                &format!("npm:{}", version),
-                &expected_hash,
+                "out.zip".into(),
                 std::fs::File::open(args.next().expect(help)).unwrap(),
-            ) {
-                Ok(out) => eprintln!("Wrote {:?}", out),
-                Err(_) => eprintln!("Hash mismatch"),
-            }
+                None,
+            );
         }
         _ => {
             eprintln!("USAGE: yarn-zip <fetch|convert> [options]");
@@ -82,144 +79,236 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
 
     eprintln!("{:?}", cache_version);
 
-    let supported_version: usize = std::env!("YARN_ZIP_SUPPORTED_CACHE_VERSION")
-        .parse()
-        .unwrap();
-    assert_eq!(cache_version.version, supported_version);
+    assert_eq!(cache_version.version, *SUPPORTED_CACHE_VERSION);
 
     let lockfile = yarn_lock_parser::parse_str(lockfile_contents).unwrap();
 
     (cache_version, lockfile)
 }
 
-fn get_sources_from_lockfile(lockfile: Lockfile) -> Vec<Source> {
-    let mut hashes_found = HashSet::new();
-    lockfile
-        .entries
-        .into_iter()
-        .filter_map(|package| {
-            let Some((name, version)) = package.resolved.split_once("@npm:") else {
-                // Something other than npm
-
-                if package.resolved.contains("@workspace:")
-                    || package.resolved.contains("@patch:")
-                    || package.resolved.contains("@link:")
-                {
-                    // these dependencies can be handled offline by yarn at a later stage,
-                    // provided that all the sources have been fetched
-                    return None;
-                }
-
-                if let Some((_name, url_and_commit)) = package.resolved.split_once("@https:") {
-                    let Some((url, commit)) = url_and_commit.split_once("#commit=") else {
-                        eprintln!("Git dependency without commit hash: {}", package.resolved);
-                        std::process::exit(1);
-                    };
-                    if commit.len() != 40 {
-                        eprintln!(
-                            "Git dependency with bad commit hash length {}: {}...",
-                            commit.len(),
-                            package.resolved
-                        );
-                        std::process::exit(1);
-                    }
-                    if !hashes_found.insert(commit) {
-                        eprintln!(
-                            "Duplicate commit hash for git dependency {}, skipping...",
-                            package.resolved
-                        );
-                        return None;
-                    }
-
-                    let repo = format!("https:{}", url);
-                    return Some(Source::Git {
-                        repo,
-                        commit: commit.into(),
-                    });
-                }
-
-                eprintln!("Unsupported source: {}", package.resolved);
-                std::process::exit(1);
-            };
-            // We have an npm dependency
-            let integrity = package.integrity.split("/").last().unwrap();
-            match integrity.len() {
-                128 => {}
-                0 => {
-                    eprintln!("Missing hash for package {} {}, skipping...", name, version);
-                    return None;
-                }
-                len => {
-                    eprintln!(
-                        "Bad hash length {} for package {} {}, skipping...",
-                        len, name, version
-                    );
-                    return None;
-                }
-            }
-
-            if !hashes_found.insert(integrity) {
-                eprintln!(
-                    "Duplicate integrity for package {} {}, skipping...",
-                    name, version
-                );
-                return None;
-            }
-
-            Some(Source::Npm {
-                name: name.into(),
-                version: version.into(),
-                integrity: integrity.into(),
-            })
-        })
-        .collect()
+trait EntryExt {
+    fn name(&self) -> &str;
+    fn name_rest(&self) -> &str;
+    fn scope(&self) -> Option<&str>;
+    fn scope_name(&self) -> Option<&str>;
+    fn resolution(&self) -> &str;
+    fn protocol(&self) -> &str;
+    fn protocol_and_source(&self) -> Option<&str>;
+    fn source_and_selector(&self) -> &str;
+    fn source(&self) -> Option<&str>;
+    fn selector(&self) -> &str;
+    fn is_real_source(&self) -> bool;
+    fn is_npm(&self) -> bool;
+    fn npm_url(&self) -> String;
+    fn is_tar(&self) -> bool;
+    fn is_git(&self) -> bool;
+    fn git_commit(&self) -> Option<&str>;
+    fn integrity_sha512(&self) -> Option<&str>;
+    fn slug(&self) -> String;
 }
 
-enum Source {
-    Npm {
-        name: String,
-        version: String,
-        integrity: String,
-    },
-    Git {
-        repo: String,
-        commit: String,
-    },
+impl EntryExt for yarn_lock_parser::Entry<'_> {
+    fn name(&self) -> &str {
+        self.resolved.rsplit_once("@").unwrap().0
+    }
+
+    fn name_rest(&self) -> &str {
+        let name = self.name();
+        match name.split_once("/") {
+            None => name,
+            Some((_, rest)) => rest,
+        }
+    }
+
+    fn scope(&self) -> Option<&str> {
+        self.name().split_once("/").map(|(scope, _)| scope)
+    }
+
+    fn scope_name(&self) -> Option<&str> {
+        self.scope().map(|scope| scope.strip_prefix("@").unwrap())
+    }
+
+    fn resolution(&self) -> &str {
+        self.resolved.rsplit_once("@").unwrap().1
+    }
+
+    fn protocol(&self) -> &str {
+        self.resolution().split_once(":").unwrap().0
+    }
+
+    fn source_and_selector(&self) -> &str {
+        self.resolution().split_once(":").unwrap().1
+    }
+
+    fn protocol_and_source(&self) -> Option<&str> {
+        self.resolution()
+            .split_once("#")
+            .map(|(protocol_and_source, _)| protocol_and_source)
+    }
+
+    fn selector(&self) -> &str {
+        let source_and_selector = self.source_and_selector();
+        source_and_selector
+            .split_once("#")
+            .unwrap_or(("", source_and_selector))
+            .1
+    }
+
+    fn source(&self) -> Option<&str> {
+        self.source_and_selector()
+            .split_once("#")
+            .map(|(source, _selector)| source)
+    }
+
+    fn is_real_source(&self) -> bool {
+        !["workspace", "patch", "link"].contains(&self.protocol())
+    }
+
+    fn npm_url(&self) -> String {
+        format!(
+            "https://registry.npmjs.org/{}/-/{}-{}.tgz",
+            self.name(),
+            self.name_rest(),
+            self.selector()
+        )
+    }
+
+    fn is_npm(&self) -> bool {
+        self.protocol() == "npm"
+    }
+
+    fn is_tar(&self) -> bool {
+        let resolution = self.resolution();
+        ["http", "https"].contains(&self.protocol())
+            && (resolution.ends_with(".tar.gz") || resolution.ends_with(".tgz"))
+    }
+
+    fn is_git(&self) -> bool {
+        self.resolution().contains(".git#")
+    }
+
+    fn git_commit(&self) -> Option<&str> {
+        self.selector()
+            .split("&")
+            .filter_map(|pair| pair.split_once("="))
+            .find(|(name, _)| name == &"commit")
+            .map(|(_, commit)| commit)
+    }
+
+    fn integrity_sha512(&self) -> Option<&str> {
+        let integrity = self.integrity.split("/").last().unwrap();
+        if integrity.len() == 0 {
+            None
+        } else {
+            assert_eq!(integrity.len(), 128);
+            Some(integrity)
+        }
+    }
+
+    fn slug(&self) -> String {
+        let mut slug = "".to_string();
+        slug.push_str(&self.name().replace("/", "-"));
+        let selector = self.selector();
+        if semver::Version::parse(selector).is_ok() {
+            slug.push_str(selector);
+            slug.push_str("-");
+        }
+        slug
+    }
+}
+
+// Panics if we don't know how to fetch the source (even with added integrity data)
+impl TryFrom<&yarn_lock_parser::Entry<'_>> for SourceWithIntegrity {
+    type Error = SourceWithoutIntegrity;
+
+    fn try_from(
+        e: &yarn_lock_parser::Entry,
+    ) -> Result<SourceWithIntegrity, SourceWithoutIntegrity> {
+        assert!(
+            (e.is_npm() as u8 + e.is_tar() as u8 + e.is_git() as u8) < 2,
+            "Ambiguous source: {}",
+            e.resolved
+        );
+        if e.is_npm() {
+            match e.integrity_sha512() {
+                None => Err(SourceWithoutIntegrity::Tgz { url: e.npm_url() }),
+                Some(integrity) => Ok(SourceWithIntegrity::Tgz {
+                    url: e.npm_url(),
+                    integrity: integrity.into(),
+                }),
+            }
+        } else if e.is_tar() {
+            match e.integrity_sha512() {
+                None => Err(SourceWithoutIntegrity::Tgz {
+                    url: e.resolution().into(),
+                }),
+                Some(integrity) => Ok(SourceWithIntegrity::Tgz {
+                    url: e.resolution().into(),
+                    integrity: integrity.into(),
+                }),
+            }
+        } else if e.is_git() {
+            match e.git_commit() {
+                None => panic!("Git dependency without commit hash: {}", e.resolved),
+                Some(commit) => Ok(SourceWithIntegrity::Git {
+                    repo: e.protocol_and_source().unwrap().into(),
+                    commit: commit.into(),
+                }),
+            }
+        } else {
+            panic!("Unsupported or unrecognized source: {}", e.resolved);
+        }
+    }
+}
+
+enum SourceWithoutIntegrity {
+    Tgz { url: String },
+}
+
+enum SourceWithIntegrity {
+    Tgz { url: String, integrity: String },
+    Git { repo: String, commit: String },
 }
 
 struct Cache {
     out_dir: String,
-    compression: Option<u32>,
+    key: CacheKey,
+    is_global: bool,
 }
 
 impl Cache {
+    fn zip_name(&self, entry: &yarn_lock_parser::Entry) -> String {
+        let ident_hash = hex::encode(Sha512::digest(format!(
+            "{}{}",
+            entry.scope_name().unwrap_or_default(),
+            entry.name_rest(),
+        )));
+        let locator_hash = hex::encode(Sha512::digest(format!(
+            "{}{}",
+            ident_hash,
+            entry.resolution()
+        )));
+
+        format!(
+            "{}-{}-{}.zip",
+            entry.slug(),
+            &locator_hash[..10],
+            if self.is_global {
+                self.key.version.to_string()
+            } else {
+                entry.integrity_sha512().unwrap()[..10].to_string()
+            },
+        )
+    }
+
     fn write_zip_and_check(
         &self,
-        package_name: &str,
-        protocol: &str,
-        reference: &str,
+        entry: yarn_lock_parser::Entry,
         integrity: &str,
         source: impl std::io::Read,
     ) -> Result<PathBuf, String> {
-        let (scope_prefix, name_rest) = package_name.split_once("/").unwrap_or(("", package_name));
-        let scope_name = scope_prefix.strip_prefix("@");
-
-        let ident_hash = hex::encode(Sha512::digest(format!(
-            "{}{}",
-            scope_name.unwrap_or_default(),
-            name_rest
-        )));
-        let locator_hash = hex::encode(Sha512::digest(format!("{}{}", ident_hash, reference)));
-
-        let dst = PathBuf::from(format!(
-            "{}/cache/{}-{}-{}-{}.zip",
-            self.out_dir,
-            package_name.replace("/", "-"),
-            protocol,
-            &locator_hash[..10],
-            &integrity[..10]
-        ));
-        zip::write_yarn_zip(package_name, dst.clone(), source, self.compression);
+        let dst = PathBuf::from(format!("{}/cache/{}", self.out_dir, self.zip_name(&entry),));
+        zip::write_yarn_zip(entry.name(), dst.clone(), source, self.key.compression);
 
         let out_hash = {
             let mut hasher = Sha512::new();
