@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::PathBuf;
 
 use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity};
@@ -21,6 +21,30 @@ Error fetching berry dependencies:
 
 Could not fetch git dependency:
 "#;
+
+fn try_fetch_tgz(client: &oxhttp::Client, url: &str) -> std::io::Result<std::fs::File> {
+    let response = client.request(Request::builder().uri(url).body(Body::empty()).unwrap())?;
+
+    if response.status() != StatusCode::OK {
+        return Err(std::io::Error::other(format!("{}", response.status())));
+    }
+
+    let mut file = tempfile::tempfile().unwrap();
+    std::io::copy(&mut response.into_body(), &mut file)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    Ok(file)
+}
+
+fn fetch_tgz(client: &oxhttp::Client, url: &str) -> std::fs::File {
+    for try_num in 1..=5 {
+        match try_fetch_tgz(client, url) {
+            Ok(file) => return file,
+            Err(e) => eprintln!("Fetching {} failed (try {}/5): {}", url, try_num, e),
+        }
+    }
+    eprintln!("Gave up on fetching {}", url);
+    std::process::exit(1);
+}
 
 impl Cache {
     pub fn fetch(&self, lockfile: Lockfile, missing_hashes_path: Option<&str>) {
@@ -128,16 +152,9 @@ impl Cache {
         url: String,
         integrity: String,
     ) {
-        let response = client
-            .request(Request::builder().uri(&url).body(Body::empty()).unwrap())
-            .unwrap();
+        let mut file = fetch_tgz(client, &url);
 
-        if response.status() != StatusCode::OK {
-            eprintln!("Failed to fetch {}: {}", url, response.status());
-            std::process::exit(1);
-        }
-
-        if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, response.into_body()) {
+        if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, &mut file) {
             eprintln!("Fail:     {}", url);
             eprintln!("  expected: {}", integrity);
             eprintln!("  got:      {}", out_hash);
