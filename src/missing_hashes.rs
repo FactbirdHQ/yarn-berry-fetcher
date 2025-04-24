@@ -60,12 +60,7 @@ fn add_integrity(
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let dst = tmp_dir.path().join("out.zip");
-    zip::write_yarn_zip(
-        entry.name(),
-        dst.clone(),
-        response.into_body(),
-        compression,
-    );
+    zip::write_yarn_zip(entry.name(), dst.clone(), response.into_body(), compression);
 
     let out_hash = {
         let mut hasher = Sha512::new();

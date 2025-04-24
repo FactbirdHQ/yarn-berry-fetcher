@@ -2,7 +2,8 @@ mod fetch;
 mod missing_hashes;
 mod zip;
 
-use std::path::{PathBuf, Path};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
@@ -30,11 +31,7 @@ fn fetch(lockfile_path: &str, missing_hashes_path: Option<&str>, out_dir: &Path)
         is_global: false,
     };
     cache.fetch(lockfile, missing_hashes_path);
-    std::fs::write(
-        out_dir.join("yarn.lock"),
-        &lockfile_contents,
-    )
-    .unwrap();
+    std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).unwrap();
     if let Some(missing_hashes_path) = missing_hashes_path {
         std::fs::copy(
             missing_hashes_path,
@@ -62,16 +59,30 @@ fn main() {
                 .expect("yarn-zip prefetch <yarn.lock> [missing-hashes.json]");
             let missing_hashes_path = args.next();
             let tmp_dir = tempfile::TempDir::new().unwrap();
-            fetch(&lockfile_path, missing_hashes_path.as_deref(), tmp_dir.path());
+            fetch(
+                &lockfile_path,
+                missing_hashes_path.as_deref(),
+                tmp_dir.path(),
+            );
 
-            let output = std::process::Command::new("nix-hash")
+            let mut output = match std::process::Command::new("nix-hash")
                 .arg("--type")
                 .arg("sha256")
                 .arg("--sri")
                 .arg(tmp_dir.path())
                 .output()
-                .unwrap();
-            assert!(output.status.success(), "nix-hash errored: {}", String::from_utf8_lossy(&output.stderr));
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Error spawning nix-hash: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            if !output.status.success() {
+                eprintln!("nix-hash errored:");
+                std::io::stderr().write_all(&mut output.stderr).unwrap();
+                std::process::exit(1);
+            }
 
             tmp_dir.close().unwrap();
             println!("{}", String::from_utf8_lossy(&output.stdout));
@@ -128,7 +139,18 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
 
     eprintln!("{:?}", cache_version);
 
-    assert_eq!(cache_version.version, *SUPPORTED_CACHE_VERSION);
+    if cache_version.version != *SUPPORTED_CACHE_VERSION {
+        eprintln!(
+            r#"
+Error fetching berry dependencies.
+Found cache version {}
+Supported by this version of yarn-berry-fetcher: {}
+Hint: Are you using fetchYarnBerryDeps from the correct yarn-berry version?"#,
+            cache_version.version, *SUPPORTED_CACHE_VERSION
+        );
+
+        std::process::exit(1);
+    }
 
     let lockfile = yarn_lock_parser::parse_str(lockfile_contents).unwrap();
 
@@ -374,7 +396,10 @@ impl Cache {
         integrity: &str,
         source: impl std::io::Read,
     ) -> Result<PathBuf, String> {
-        let dst = self.out_dir.join("cache").join(self.zip_name(&entry, integrity));
+        let dst = self
+            .out_dir
+            .join("cache")
+            .join(self.zip_name(&entry, integrity));
         zip::write_yarn_zip(entry.name(), dst.clone(), source, self.key.compression);
 
         let out_hash = {
