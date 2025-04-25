@@ -165,6 +165,8 @@ pub trait EntryExt {
     fn resolution(&self) -> &str;
     fn protocol(&self) -> &str;
     fn protocol_and_source(&self) -> Option<&str>;
+    fn source_selector_and_bindings(&self) -> &str;
+    fn bindings(&self) -> Option<form_urlencoded::Parse<'_>>;
     fn source_and_selector(&self) -> &str;
     fn source(&self) -> Option<&str>;
     fn selector(&self) -> &str;
@@ -218,8 +220,23 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
         self.resolution().split_once(":").unwrap().0
     }
 
-    fn source_and_selector(&self) -> &str {
+    fn source_selector_and_bindings(&self) -> &str {
         self.resolution().split_once(":").unwrap().1
+    }
+
+    fn bindings(&self) -> Option<form_urlencoded::Parse<'_>> {
+        let source_selector_and_bindings = self.source_selector_and_bindings();
+        source_selector_and_bindings
+            .rsplit_once("::")
+            .map(|(_, bindings)| form_urlencoded::parse(bindings.as_bytes()))
+    }
+
+    fn source_and_selector(&self) -> &str {
+        let source_selector_and_bindings = self.source_selector_and_bindings();
+        source_selector_and_bindings
+            .rsplit_once("::")
+            .unwrap_or((source_selector_and_bindings, ""))
+            .0
     }
 
     fn protocol_and_source(&self) -> Option<&str> {
@@ -247,6 +264,15 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     }
 
     fn npm_url(&self) -> String {
+        if let Some(mut bindings) = self.bindings() {
+            if let Some(archive_url) = bindings
+                .find(|(name, _)| name == &"__archiveUrl")
+                .map(|(_, archive_url)| archive_url)
+            {
+                return archive_url.into();
+            }
+        }
+
         format!(
             "https://registry.npmjs.org/{}/-/{}-{}.tgz",
             self.name(),
