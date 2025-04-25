@@ -383,7 +383,14 @@ impl Cache {
             entry.slug(),
             &locator_hash[..10],
             if self.is_global || !entry.is_content_addressed() {
-                self.key.version.to_string()
+                format!(
+                    "{}{}",
+                    self.key.version,
+                    self.key
+                        .compression
+                        .map(|c| format!("c{}", c))
+                        .unwrap_or_default()
+                )
             } else {
                 integrity[..10].to_string()
             },
