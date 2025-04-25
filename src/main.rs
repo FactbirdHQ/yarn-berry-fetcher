@@ -48,7 +48,7 @@ fn main() {
         Some("fetch") => {
             let lockfile_path = args
                 .next()
-                .expect("yarn-zip fetch <yarn.lock> [missing-hashes.json]");
+                .expect("yarn-berry-fetcher fetch <yarn.lock> [missing-hashes.json]");
             let missing_hashes_path = args.next();
             let out_dir = PathBuf::from(std::env::var("out").unwrap_or("out".into()));
             fetch(&lockfile_path, missing_hashes_path.as_deref(), &out_dir)
@@ -56,7 +56,7 @@ fn main() {
         Some("prefetch") => {
             let lockfile_path = args
                 .next()
-                .expect("yarn-zip prefetch <yarn.lock> [missing-hashes.json]");
+                .expect("yarn-berry-fetcher prefetch <yarn.lock> [missing-hashes.json]");
             let missing_hashes_path = args.next();
             let tmp_dir = tempfile::TempDir::new().unwrap();
             fetch(
@@ -88,7 +88,7 @@ fn main() {
             println!("{}", String::from_utf8_lossy(&output.stdout));
         }
         Some("missing-hashes") => {
-            let lockfile_path = args.next().expect("yarn-zip fetch <yarn.lock>");
+            let lockfile_path = args.next().expect("yarn-berry-fetcher missing-hashes <yarn.lock>");
             let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
 
@@ -97,7 +97,7 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
         }
         Some("convert") => {
-            let help = "yarn-zip convert <full package name> <package version> <npm.tgz>";
+            let help = "yarn-berry-fetcher convert <full package name> <package version> <npm.tgz>";
             let package_name = args.next().expect(help);
             zip::write_yarn_zip(
                 &package_name,
@@ -108,7 +108,24 @@ fn main() {
             eprintln!("wrote out.zip");
         }
         _ => {
-            eprintln!("USAGE: yarn-zip <fetch|convert|missing-hashes> [options]");
+            eprintln!(r#"USAGE: yarn-berry-fetcher <fetch|prefetch|missing-hashes|convert> [options]
+
+fetch <yarn.lock> [missing-hashes.json]
+    download packages in the given yarn lock file to the the directory
+    specified by the "$out" environment variable. If "out" is unset,
+    the literal direcory "out" will be used.
+
+prefetch <yarn.lock> [missing-hashes.json]
+    download packages in the given yarn.lock file, and print the
+    appropriate 'nix-hash' for it.
+
+missing-hashes <yarn.lock>
+    Produce the missing-hashes data, and print it to stdout.
+    Other commands expect this as the 'missing-hashes.json'
+    argument.
+
+convert <full package name> <package version> <npm.tgz>
+    Convert an npm tgz file, write it to 'out.zip'."#);
             std::process::exit(1);
         }
     }
