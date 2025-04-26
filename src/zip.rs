@@ -104,6 +104,7 @@ pub fn write_yarn_zip(
             }
 
             match header.entry_type() {
+                tar::EntryType::XGlobalHeader => {}
                 tar::EntryType::Regular => {
                     let (src, must_flush) = if entry.size() >= (BIG_FILE_THRESHOLD as u64) {
                         // The file is >= BIG_FILE_THRESHOLD, pass it as a streaming reader to avoid buffering it,
