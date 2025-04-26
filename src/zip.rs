@@ -19,6 +19,8 @@ static SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
     DOSDateTime::try_from(DateTime::from_timestamp(456789000, 0).unwrap().naive_utc()).unwrap()
 });
 
+const BATCH_SIZE: usize = 1024 * 1024 * 10; // 10 MiB
+
 fn add_ancestors(zip: &mut ZipArchive, included_directories: &mut HashSet<PathBuf>, dir: &Path) {
     if let Some(parent) = dir.parent() {
         add_ancestors(zip, included_directories, parent);
@@ -55,23 +57,16 @@ pub fn write_yarn_zip(
     let mut included_directories = HashSet::new();
 
     let mut first_open = true;
-    for entry in tar.entries().unwrap() {
-        let mut entry = entry.unwrap();
+    let mut entries_iter = tar.entries().unwrap();
 
-        let path = entry.path().unwrap();
-        let mut path_iter = path.components();
-        path_iter.next();
-        let path = path_iter.as_path();
-        // strip "package/" and add "node_modules/{package_name}/"
-        let path = PathBuf::from("node_modules/").join(package_name).join(path);
-
-        let header = entry.header();
-        let mode = header.mode().unwrap();
-
-        // We need to re-open the zip for each entry, because libzip may access
-        // the buffer we pass until the archive has been closed, but we want to
-        // free the buffer after processing each entry.
-        let mut buf = vec![];
+    // libzip may access the buffers we pass until the archive has been closed, but we need
+    // to prevent keeping the entire archive contents in-memory.
+    //
+    // We can work around this by closing and re-opening the archive, which will trigger
+    // libzip to free the buffers. On the other hand, we don't want to close and re-open
+    // the archive on each file, because this is slow for a lot of smaller files.
+    // As a compromise, we add up to BATCH_SIZE of content to the archive before performing the flush.
+    'outer: loop {
         let mut zip = {
             let src = Source::try_from(AsRef::<Path>::as_ref(&dst)).unwrap();
             if first_open {
@@ -82,61 +77,83 @@ pub fn write_yarn_zip(
             }
         };
 
-        // Insert all parent directories of the new path
-        if let Some(parent) = path.parent() {
-            add_ancestors(&mut zip, &mut included_directories, parent);
-        }
+        let mut bytes_added = 0;
 
-        match header.entry_type() {
-            tar::EntryType::Regular => {
-                entry.read_to_end(&mut buf).unwrap();
+        while bytes_added < BATCH_SIZE {
+            let Some(entry) = entries_iter.next() else {
+                zip.close().unwrap();
+                break 'outer;
+            };
 
-                let src = Source::try_from(&buf[..]).unwrap();
-                let path = CString::new(path.into_os_string().into_vec()).unwrap();
-                let add_result = zip.add(
-                    path,
-                    src,
-                    Encoding::Guess,
-                    match compression {
-                        None => Compression::Default,
-                        Some(0) => Compression::Store,
-                        Some(i) => Compression::Deflate(i),
-                    },
-                    Some(
-                        mode as u16 & 0o755
-                            | (if (mode & 0o111) != 0 { 0o111 } else { 0 })
-                            | (if (mode & 0o444) != 0 { 0o444 } else { 0 }),
-                    ),
-                    Some((*SAFE_TIME).into()),
-                    false,
-                );
-                if let Err(e) = add_result {
-                    match &e.zip {
-                        Some(ZipError::Exists) => {} // ignore
-                        _ => panic!("{}", e),
+            let mut entry = entry.unwrap();
+
+            let path = entry.path().unwrap();
+            let mut path_iter = path.components();
+            path_iter.next();
+            let path = path_iter.as_path();
+            // strip "package/" and add "node_modules/{package_name}/"
+            let path = PathBuf::from("node_modules/").join(package_name).join(path);
+
+            let header = entry.header();
+            let mode = header.mode().unwrap();
+
+            // Insert all parent directories of the new path
+            if let Some(parent) = path.parent() {
+                add_ancestors(&mut zip, &mut included_directories, parent);
+            }
+
+            match header.entry_type() {
+                tar::EntryType::Regular => {
+                    let mut buf = vec![];
+                    bytes_added += entry.read_to_end(&mut buf).unwrap();
+                    let src = Source::try_from(buf.into_boxed_slice()).unwrap();
+                    let path = CString::new(path.into_os_string().into_vec()).unwrap();
+                    let add_result = zip.add(
+                        path,
+                        src,
+                        Encoding::Guess,
+                        match compression {
+                            None => Compression::Default,
+                            Some(0) => Compression::Store,
+                            Some(i) => Compression::Deflate(i),
+                        },
+                        Some(
+                            mode as u16 & 0o755
+                                | (if (mode & 0o111) != 0 { 0o111 } else { 0 })
+                                | (if (mode & 0o444) != 0 { 0o444 } else { 0 }),
+                        ),
+                        Some((*SAFE_TIME).into()),
+                        false,
+                    );
+                    if let Err(e) = add_result {
+                        match &e.zip {
+                            Some(ZipError::Exists) => {} // ignore
+                            _ => panic!("{}", e),
+                        }
                     }
                 }
-            }
-            tar::EntryType::Directory => {
-                if !included_directories.insert(path.to_owned()) {
-                    return;
+                tar::EntryType::Directory => {
+                    if !included_directories.insert(path.to_owned()) {
+                        return;
+                    }
+
+                    let path = path.to_owned().into_os_string().into_vec();
+
+                    zip.add_dir_entry(
+                        CString::new(path).unwrap(),
+                        Encoding::Guess,
+                        Some(0o755),
+                        Some((*SAFE_TIME).into()),
+                    )
+                    .unwrap();
                 }
-
-                let path = path.to_owned().into_os_string().into_vec();
-
-                zip.add_dir_entry(
-                    CString::new(path).unwrap(),
-                    Encoding::Guess,
-                    Some(0o755),
-                    Some((*SAFE_TIME).into()),
-                )
-                .unwrap();
-            }
-            other => {
-                panic!("Unsupported tar entry: {:?} {:?}", path, other)
+                other => {
+                    panic!("Unsupported tar entry: {:?} {:?}", path, other)
+                }
             }
         }
 
+        // At this point we have written enough data to the archive, so we start a new batch
         zip.close().unwrap();
     }
 }

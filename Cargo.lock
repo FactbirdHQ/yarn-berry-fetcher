@@ -31,9 +31,9 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 
 [[package]]
 name = "axfive-libzip"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa6578a9fec4556c87e2eac2d4e84ec67bb1e88a070cb6f81c4aa827a593952"
+checksum = "2ba555a7740fc455072d64ba93d75805a4d4c670b1c323aa3b12a5a1ae554d2d"
 dependencies = [
  "axfive-libzip-sys",
 ]
