@@ -102,7 +102,6 @@ pub fn write_yarn_zip(
                         Some(0) => Compression::Store,
                         Some(i) => Compression::Deflate(i),
                     },
-                    //if level == 0 { Compression::Store } else { Compression::Default },
                     Some(
                         mode as u16 & 0o755
                             | (if (mode & 0o111) != 0 { 0o111 } else { 0 })
