@@ -97,7 +97,7 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
         }
         Some("convert") => {
-            let help = "yarn-berry-fetcher convert <full package name> <package version> <npm.tgz>";
+            let help = "yarn-berry-fetcher convert <full package name> <npm.tgz>";
             let package_name = args.next().expect(help);
             zip::write_yarn_zip(
                 &package_name,
@@ -124,7 +124,7 @@ missing-hashes <yarn.lock>
     Other commands expect this as the 'missing-hashes.json'
     argument.
 
-convert <full package name> <package version> <npm.tgz>
+convert <full package name> <npm.tgz>
     Convert an npm tgz file, write it to 'out.zip'."#);
             std::process::exit(1);
         }
