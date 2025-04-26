@@ -20,6 +20,7 @@ static SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
 });
 
 const BATCH_SIZE: usize = 1024 * 1024 * 10; // 10 MiB
+const BIG_FILE_THRESHOLD: usize = 1024 * 1024 * 2; // 2 MiB
 
 fn add_ancestors(zip: &mut ZipArchive, included_directories: &mut HashSet<PathBuf>, dir: &Path) {
     if let Some(parent) = dir.parent() {
@@ -104,9 +105,25 @@ pub fn write_yarn_zip(
 
             match header.entry_type() {
                 tar::EntryType::Regular => {
-                    let mut buf = vec![];
-                    bytes_added += entry.read_to_end(&mut buf).unwrap();
-                    let src = Source::try_from(buf.into_boxed_slice()).unwrap();
+                    let (src, must_flush) = if entry.size() >= BIG_FILE_THRESHOLD {
+                        // The file is >= BIG_FILE_THRESHOLD, pass it as a streaming reader to avoid buffering it,
+                        // and immediately close the archive to force reading while the input tar
+                        // stream is still at the position of that Entry.
+                        let size = entry.size();
+                        let src = Source::from_reader_with_size(
+                            Box::new(entry) as Box<dyn std::io::Read>,
+                            size as usize,
+                        )
+                        .unwrap();
+                        (src, true)
+                    } else {
+                        // The file is < BIG_FILE_THRESHOLD, read it into a buffer and add it in batch containing
+                        // up to BATCH_SIZE of contents combined
+                        let mut buf = vec![];
+                        bytes_added += entry.read_to_end(&mut buf).unwrap();
+                        let src = Source::try_from(buf.into_boxed_slice()).unwrap();
+                        (src, false)
+                    };
                     let path = CString::new(path.into_os_string().into_vec()).unwrap();
                     let add_result = zip.add(
                         path,
@@ -130,6 +147,10 @@ pub fn write_yarn_zip(
                             Some(ZipError::Exists) => {} // ignore
                             _ => panic!("{}", e),
                         }
+                    }
+                    if must_flush {
+                        zip.close().unwrap();
+                        continue 'outer;
                     }
                 }
                 tar::EntryType::Directory => {
