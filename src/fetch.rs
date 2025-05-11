@@ -22,6 +22,8 @@ Error fetching berry dependencies:
 Could not fetch git dependency:
 "#;
 
+const USER_AGENT: &'static str = "yarn-berry-fetcher/1";
+
 fn try_fetch_tgz(client: &oxhttp::Client, url: &str) -> std::io::Result<std::fs::File> {
     let response = client.request(Request::builder().uri(url).body(Body::empty()).unwrap())?;
 
@@ -91,7 +93,12 @@ impl Cache {
             .unwrap();
 
         sources.into_par_iter().panic_fuse().for_each_init(
-            oxhttp::Client::new,
+            || {
+                oxhttp::Client::new()
+                    .with_user_agent(USER_AGENT)
+                    .expect("USER_AGENT to be valid")
+                    .with_redirection_limit(5)
+            },
             |client, (entry, source)| {
                 let unwind_result =
                     std::panic::catch_unwind(|| self.fetch_source(client, entry, source));
