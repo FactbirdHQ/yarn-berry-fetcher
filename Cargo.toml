@@ -1,6 +1,6 @@
 [package]
 name = "yarn-berry-fetcher"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2024"
 
 [dependencies]

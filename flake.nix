@@ -27,7 +27,7 @@
 
           rustPlatform.buildRustPackage {
             pname = "yarn-berry-fetcher";
-            version = "1.2.2";
+            version = "1.2.3";
 
             src = self;
 
