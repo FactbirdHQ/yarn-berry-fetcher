@@ -23,7 +23,8 @@ static SUPPORTED_CACHE_VERSION: LazyLock<usize> = LazyLock::new(|| {
 });
 
 fn fetch(lockfile_path: &str, missing_hashes_path: Option<&str>, out_dir: &Path) {
-    let lockfile_contents = std::fs::read_to_string(lockfile_path).unwrap();
+    let lockfile_contents =
+        std::fs::read_to_string(lockfile_path).expect("unable to open lockfile");
     let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
     let cache = Cache {
         out_dir: out_dir.to_owned(),
