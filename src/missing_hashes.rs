@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use crate::{CacheKey, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity, zip};
+use crate::{
+    CacheKey, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity,
+    fetch::fetch_to_tempfile, zip,
+};
 
-use oxhttp::model::{Body, Request, StatusCode};
 use rayon::prelude::*;
 use sha2::{Digest, Sha512};
 
@@ -48,19 +50,13 @@ fn add_integrity(
 ) -> (String, String) {
     let SourceWithoutIntegrity::Tgz { url } = source;
 
-    let response = client
-        .request(Request::builder().uri(&url).body(Body::empty()).unwrap())
-        .unwrap();
-
-    if response.status() != StatusCode::OK {
-        eprintln!("Failed to fetch {}: {}", url, response.status());
-        std::process::exit(1);
-    }
+    let f = fetch_to_tempfile(client, &url);
     eprintln!("Success:  {}", url);
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let dst = tmp_dir.path().join("out.zip");
-    zip::write_yarn_zip(entry.name(), dst.clone(), response.into_body(), compression);
+
+    zip::write_yarn_zip(entry.name(), dst.clone(), f, compression);
 
     let out_hash = {
         let mut hasher = Sha512::new();

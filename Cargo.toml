@@ -12,6 +12,7 @@ form_urlencoded = "1.2.1"
 hex = "0.4.3"
 oxhttp = { version = "0.3.0", default-features = false, features = ["client", "native-tls"] }
 rayon = "1.10.0"
+retry = "2.1.0"
 semver = "1.0.26"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"

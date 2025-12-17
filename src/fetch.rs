@@ -23,29 +23,41 @@ Could not fetch git dependency:
 "#;
 
 const USER_AGENT: &'static str = "yarn-berry-fetcher/1";
+const MAX_ATTEMPTS: usize = 5;
 
-fn try_fetch_tgz(client: &oxhttp::Client, url: &str) -> std::io::Result<std::fs::File> {
-    let response = client.request(Request::builder().uri(url).body(Body::empty()).unwrap())?;
-
-    if response.status() != StatusCode::OK {
-        return Err(std::io::Error::other(format!("{}", response.status())));
-    }
-
+/// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
+pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> std::fs::File {
     let mut file = tempfile::tempfile().unwrap();
-    std::io::copy(&mut response.into_body(), &mut file)?;
-    file.seek(std::io::SeekFrom::Start(0))?;
-    Ok(file)
-}
 
-fn fetch_tgz(client: &oxhttp::Client, url: &str) -> std::fs::File {
-    for try_num in 1..=5 {
-        match try_fetch_tgz(client, url) {
-            Ok(file) => return file,
-            Err(e) => eprintln!("Fetching {} failed (try {}/5): {}", url, try_num, e),
+    match retry::retry_with_index(
+        retry::delay::Exponential::from_millis(500)
+            .take(MAX_ATTEMPTS)
+            .map(retry::delay::jitter),
+        |i| {
+            // i is the number of the try, so starts from 1, not 0.
+            if i != 1 {
+                let prev = i - 1;
+                eprintln!("Failed to fetch (on try {prev}/{MAX_ATTEMPTS}): {url}");
+            }
+
+            let response =
+                client.request(Request::builder().uri(url).body(Body::empty()).unwrap())?;
+
+            if response.status() != StatusCode::OK {
+                return Err(std::io::Error::other(format!("{}", response.status())));
+            }
+
+            std::io::copy(&mut response.into_body(), &mut file)?;
+            file.seek(std::io::SeekFrom::Start(0))?;
+            Ok(())
+        },
+    ) {
+        Ok(_) => file,
+        Err(e) => {
+            eprintln!("Finally gave up on fetching {url}: {e}");
+            std::process::exit(1);
         }
     }
-    eprintln!("Gave up on fetching {}", url);
-    std::process::exit(1);
 }
 
 impl Cache {
@@ -159,7 +171,7 @@ impl Cache {
         url: String,
         integrity: String,
     ) {
-        let mut file = fetch_tgz(client, &url);
+        let mut file = fetch_to_tempfile(client, &url);
 
         if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, &mut file) {
             eprintln!("Fail:     {}", url);
