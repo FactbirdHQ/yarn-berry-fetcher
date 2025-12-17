@@ -51,7 +51,7 @@ fn add_integrity(
     let SourceWithoutIntegrity::Tgz { url } = source;
 
     let f = fetch_to_tempfile(client, &url);
-    eprintln!("Success:  {}", url);
+    eprintln!("Success:  {url}");
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let dst = tmp_dir.path().join("out.zip");

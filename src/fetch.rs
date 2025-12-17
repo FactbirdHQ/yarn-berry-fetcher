@@ -7,7 +7,7 @@ use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegri
 use oxhttp::model::{Body, Request, StatusCode};
 use rayon::prelude::*;
 
-const OUTDATED_MISSING_HASHES_ERR: &'static str = r#"
+const OUTDATED_MISSING_HASHES_ERR: &str = r#"
 Error fetching berry dependencies:
 
 The missingHashes passed to fetchYarnBerryDeps was either missing or outdated
@@ -16,13 +16,13 @@ information:
 
 https://nixos.org/manual/nixpkgs/unstable/#javascript-yarnBerry-missing-hashes
 "#;
-const NIX_PREFETCH_GIT_ERR: &'static str = r#"
+const NIX_PREFETCH_GIT_ERR: &str = r#"
 Error fetching berry dependencies:
 
 Could not fetch git dependency:
 "#;
 
-const USER_AGENT: &'static str = "yarn-berry-fetcher/1";
+const USER_AGENT: &str = "yarn-berry-fetcher/1";
 const MAX_ATTEMPTS: usize = 5;
 
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
@@ -76,7 +76,7 @@ impl Cache {
                     Err(missing_integrity) => {
                         let SourceWithoutIntegrity::Tgz { url } = missing_integrity;
                         let Some(integrity) = missing_hashes.remove(entry.resolved) else {
-                            eprintln!("{}", OUTDATED_MISSING_HASHES_ERR);
+                            eprintln!("{OUTDATED_MISSING_HASHES_ERR}");
                             std::process::exit(1);
                         };
                         assert_eq!(
@@ -93,7 +93,7 @@ impl Cache {
             .collect::<Vec<_>>();
 
         if !missing_hashes.is_empty() {
-            eprintln!("{}", OUTDATED_MISSING_HASHES_ERR);
+            eprintln!("{OUTDATED_MISSING_HASHES_ERR}");
             std::process::exit(1);
         }
 
@@ -146,7 +146,7 @@ impl Cache {
         {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Error spawning nix-prefetch-git: {}", e);
+                eprintln!("Error spawning nix-prefetch-git: {e}");
                 std::process::exit(1);
             }
         };
@@ -161,7 +161,7 @@ impl Cache {
             std::io::stderr().write_all(&output.stderr).unwrap();
             std::process::exit(1);
         }
-        eprintln!("Success:  git+{}#commit={}", repo, commit);
+        eprintln!("Success:  git+{repo}#commit={commit}");
     }
 
     fn fetch_tgz_and_write_zip(
@@ -174,12 +174,12 @@ impl Cache {
         let mut file = fetch_to_tempfile(client, &url);
 
         if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, &mut file) {
-            eprintln!("Fail:     {}", url);
-            eprintln!("  expected: {}", integrity);
-            eprintln!("  got:      {}", out_hash);
+            eprintln!("Fail:     {url}");
+            eprintln!("  expected: {integrity}");
+            eprintln!("  got:      {out_hash}");
             std::process::exit(1);
         } else {
-            eprintln!("Success:  {}", url);
+            eprintln!("Success:  {url}");
         }
     }
 }

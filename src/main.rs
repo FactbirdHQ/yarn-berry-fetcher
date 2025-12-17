@@ -66,7 +66,7 @@ fn main() {
                 tmp_dir.path(),
             );
 
-            let mut output = match std::process::Command::new("nix-hash")
+            let output = match std::process::Command::new("nix-hash")
                 .arg("--type")
                 .arg("sha256")
                 .arg("--sri")
@@ -75,13 +75,13 @@ fn main() {
             {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("Error spawning nix-hash: {}", e);
+                    eprintln!("Error spawning nix-hash: {e}");
                     std::process::exit(1);
                 }
             };
             if !output.status.success() {
                 eprintln!("nix-hash errored:");
-                std::io::stderr().write_all(&mut output.stderr).unwrap();
+                std::io::stderr().write_all(&output.stderr).unwrap();
                 std::process::exit(1);
             }
 
@@ -89,7 +89,9 @@ fn main() {
             println!("{}", String::from_utf8_lossy(&output.stdout));
         }
         Some("missing-hashes") => {
-            let lockfile_path = args.next().expect("yarn-berry-fetcher missing-hashes <yarn.lock>");
+            let lockfile_path = args
+                .next()
+                .expect("yarn-berry-fetcher missing-hashes <yarn.lock>");
             let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
 
@@ -109,7 +111,8 @@ fn main() {
             eprintln!("wrote out.zip");
         }
         _ => {
-            eprintln!(r#"USAGE: yarn-berry-fetcher <fetch|prefetch|missing-hashes|convert> [options]
+            eprintln!(
+                r#"USAGE: yarn-berry-fetcher <fetch|prefetch|missing-hashes|convert> [options]
 
 fetch <yarn.lock> [missing-hashes.json]
     download packages in the given yarn lock file to the the directory
@@ -126,7 +129,8 @@ missing-hashes <yarn.lock>
     argument.
 
 convert <full package name> <npm.tgz>
-    Convert an npm tgz file, write it to 'out.zip'."#);
+    Convert an npm tgz file, write it to 'out.zip'."#
+            );
             std::process::exit(1);
         }
     }
@@ -155,7 +159,7 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
         }
     };
 
-    eprintln!("{:?}", cache_version);
+    eprintln!("{cache_version:?}");
 
     if cache_version.version != *SUPPORTED_CACHE_VERSION {
         eprintln!(
@@ -284,7 +288,7 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     fn npm_url(&self) -> String {
         if let Some(mut bindings) = self.bindings() {
             if let Some(archive_url) = bindings
-                .find(|(name, _)| name == &"__archiveUrl")
+                .find(|(name, _)| name == "__archiveUrl")
                 .map(|(_, archive_url)| archive_url)
             {
                 return archive_url.into();
@@ -432,7 +436,7 @@ impl Cache {
                     self.key.version,
                     self.key
                         .compression
-                        .map(|c| format!("c{}", c))
+                        .map(|c| format!("c{c}"))
                         .unwrap_or_default()
                 )
             } else {

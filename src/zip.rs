@@ -170,7 +170,7 @@ pub fn write_yarn_zip(
                     .unwrap();
                 }
                 other => {
-                    panic!("Unsupported tar entry: {:?} {:?}", path, other)
+                    panic!("Unsupported tar entry: {path:?} {other:?}")
                 }
             }
         }
