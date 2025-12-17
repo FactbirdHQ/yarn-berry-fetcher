@@ -30,7 +30,14 @@ pub fn get_missing_hashes(lockfile: Lockfile, cache_key: CacheKey) -> BTreeMap<S
         .panic_fuse()
         .map_init(oxhttp::Client::new, |client, (entry, source)| {
             let unwind_result = std::panic::catch_unwind(|| {
-                add_integrity(client, cache_key.compression, entry, source)
+                let SourceWithoutIntegrity::Tgz { url } = source;
+                let f = fetch_to_tempfile(client, &url);
+                eprintln!("Success:  {url}");
+
+                (
+                    entry.resolved.to_string(),
+                    calc_integrity(f, cache_key.compression, &entry.name),
+                )
             });
             match unwind_result {
                 Err(_) => std::process::exit(1),
@@ -42,30 +49,14 @@ pub fn get_missing_hashes(lockfile: Lockfile, cache_key: CacheKey) -> BTreeMap<S
     x.into_iter().collect::<BTreeMap<_, _>>()
 }
 
-fn add_integrity(
-    client: &oxhttp::Client,
-    compression: Option<u32>,
-    entry: yarn_lock_parser::Entry,
-    source: SourceWithoutIntegrity,
-) -> (String, String) {
-    let SourceWithoutIntegrity::Tgz { url } = source;
+/// Calculates the integrity digest, which is the sha512 sum of a specially crafted zipfile,
+/// lowerhex-encoded.
+fn calc_integrity(f: impl std::io::Read, compression: Option<u32>, entry_name: &str) -> String {
+    let mut zip_out = tempfile::NamedTempFile::new().expect("tempfile created");
+    zip::write_yarn_zip(entry_name, &zip_out.path(), f, compression);
 
-    let f = fetch_to_tempfile(client, &url);
-    eprintln!("Success:  {url}");
-
-    let tmp_dir = tempfile::TempDir::new().unwrap();
-    let dst = tmp_dir.path().join("out.zip");
-
-    zip::write_yarn_zip(entry.name(), dst.clone(), f, compression);
-
-    let out_hash = {
-        let mut hasher = Sha512::new();
-        let mut file = std::fs::File::open(&dst).unwrap();
-        std::io::copy(&mut file, &mut hasher).unwrap();
-        hex::encode(hasher.finalize())
-    };
-
-    tmp_dir.close().unwrap();
-
-    (entry.resolved.to_string(), out_hash)
+    // hash the produced zip file
+    let mut hasher = Sha512::new();
+    std::io::copy(&mut zip_out, &mut hasher).unwrap();
+    hex::encode(hasher.finalize())
 }

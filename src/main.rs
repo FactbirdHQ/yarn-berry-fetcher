@@ -104,7 +104,7 @@ fn main() {
             let package_name = args.next().expect(help);
             zip::write_yarn_zip(
                 &package_name,
-                "out.zip".into(),
+                "out.zip",
                 std::fs::File::open(args.next().expect(help)).unwrap(),
                 None,
             );
@@ -455,7 +455,7 @@ impl Cache {
             .out_dir
             .join("cache")
             .join(self.zip_name(&entry, integrity));
-        zip::write_yarn_zip(entry.name(), dst.clone(), source, self.key.compression);
+        zip::write_yarn_zip(entry.name(), &dst, source, self.key.compression);
 
         let out_hash = {
             let mut hasher = Sha512::new();
