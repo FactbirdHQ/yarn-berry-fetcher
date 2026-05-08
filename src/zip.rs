@@ -91,7 +91,12 @@ pub fn write_yarn_zip(
             let path = entry.path().unwrap();
             let mut path_iter = path.components();
             path_iter.next();
-            let path = path_iter.as_path();
+            // Collect remaining components, stripping CurDir (`.`) entries present in some
+            // tarballs, to match yarn's path normalization behavior.
+            let path: PathBuf = path_iter
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect();
+            debug_assert!(!path.components().any(|c| c == std::path::Component::CurDir));
             // strip "package/" and add "node_modules/{package_name}/"
             let path = PathBuf::from("node_modules/").join(package_name).join(path);
 
@@ -156,7 +161,7 @@ pub fn write_yarn_zip(
                 }
                 tar::EntryType::Directory => {
                     if !included_directories.insert(path.to_owned()) {
-                        return;
+                        continue;
                     }
 
                     let path = path.to_owned().into_os_string().into_vec();
