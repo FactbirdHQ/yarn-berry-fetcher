@@ -25,8 +25,46 @@ Could not fetch git dependency:
 const USER_AGENT: &str = "yarn-berry-fetcher/1";
 const MAX_ATTEMPTS: usize = 5;
 
+pub fn load_registry_tokens(yarnrc_path: &std::path::Path) -> HashMap<String, String> {
+    #[derive(serde::Deserialize, Default)]
+    struct NpmRegistry {
+        #[serde(rename = "npmAuthToken", default)]
+        npm_auth_token: Option<String>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct YarnRc {
+        #[serde(rename = "npmRegistries", default)]
+        npm_registries: HashMap<String, NpmRegistry>,
+    }
+
+    let content = match std::fs::read_to_string(yarnrc_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(e) => {
+            eprintln!("warning: failed to read {}: {e}", yarnrc_path.display());
+            return HashMap::new();
+        }
+    };
+    let yarnrc: YarnRc = match serde_yml::from_str(&content) {
+        Ok(y) => y,
+        Err(e) => {
+            eprintln!("warning: failed to parse {}: {e}", yarnrc_path.display());
+            return HashMap::new();
+        }
+    };
+    yarnrc
+        .npm_registries
+        .into_iter()
+        .filter_map(|(url, reg)| reg.npm_auth_token.map(|t| (url, t)))
+        .collect()
+}
+
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
-pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> std::fs::File {
+pub fn fetch_to_tempfile(
+    client: &oxhttp::Client,
+    url: &str,
+    registry_tokens: &HashMap<String, String>,
+) -> std::fs::File {
     let mut file = tempfile::tempfile().unwrap();
 
     match retry::retry_with_index(
@@ -40,8 +78,16 @@ pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> std::fs::File {
                 eprintln!("Failed to fetch (on try {prev}/{MAX_ATTEMPTS}): {url}");
             }
 
-            let response =
-                client.request(Request::builder().uri(url).body(Body::empty()).unwrap())?;
+            let auth = registry_tokens
+                .iter()
+                .find(|(registry, _)| url.starts_with(registry.as_str()))
+                .map(|(_, token)| format!("Bearer {token}"));
+
+            let mut builder = Request::builder().uri(url);
+            if let Some(ref auth) = auth {
+                builder = builder.header("Authorization", auth);
+            }
+            let response = client.request(builder.body(Body::empty()).unwrap())?;
 
             if response.status() != StatusCode::OK {
                 return Err(std::io::Error::other(format!("{}", response.status())));
@@ -171,7 +217,7 @@ impl Cache {
         url: String,
         integrity: String,
     ) {
-        let mut file = fetch_to_tempfile(client, &url);
+        let mut file = fetch_to_tempfile(client, &url, &self.registry_tokens);
 
         if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, &mut file) {
             eprintln!("Fail:     {url}");

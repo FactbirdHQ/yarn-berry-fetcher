@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     CacheKey, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity,
@@ -8,7 +8,11 @@ use crate::{
 use rayon::prelude::*;
 use sha2::{Digest, Sha512};
 
-pub fn get_missing_hashes(lockfile: Lockfile, cache_key: CacheKey) -> BTreeMap<String, String> {
+pub fn get_missing_hashes(
+    lockfile: Lockfile,
+    cache_key: CacheKey,
+    registry_tokens: &HashMap<String, String>,
+) -> BTreeMap<String, String> {
     let missing = lockfile
         .entries
         .into_iter()
@@ -30,7 +34,7 @@ pub fn get_missing_hashes(lockfile: Lockfile, cache_key: CacheKey) -> BTreeMap<S
         .panic_fuse()
         .map_init(oxhttp::Client::new, |client, (entry, source)| {
             let unwind_result = std::panic::catch_unwind(|| {
-                add_integrity(client, cache_key.compression, entry, source)
+                add_integrity(client, cache_key.compression, entry, source, registry_tokens)
             });
             match unwind_result {
                 Err(_) => std::process::exit(1),
@@ -47,10 +51,11 @@ fn add_integrity(
     compression: Option<u32>,
     entry: yarn_lock_parser::Entry,
     source: SourceWithoutIntegrity,
+    registry_tokens: &HashMap<String, String>,
 ) -> (String, String) {
     let SourceWithoutIntegrity::Tgz { url } = source;
 
-    let f = fetch_to_tempfile(client, &url);
+    let f = fetch_to_tempfile(client, &url, registry_tokens);
     eprintln!("Success:  {url}");
 
     let tmp_dir = tempfile::TempDir::new().unwrap();

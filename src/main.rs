@@ -26,10 +26,15 @@ fn fetch(lockfile_path: &str, missing_hashes_path: Option<&str>, out_dir: &Path)
     let lockfile_contents =
         std::fs::read_to_string(lockfile_path).expect("unable to open lockfile");
     let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
+    let yarnrc_path = Path::new(lockfile_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".yarnrc.yml");
     let cache = Cache {
         out_dir: out_dir.to_owned(),
         key: cache_version,
         is_global: false,
+        registry_tokens: fetch::load_registry_tokens(&yarnrc_path),
     };
     cache.fetch(lockfile, missing_hashes_path);
     std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).unwrap();
@@ -94,8 +99,14 @@ fn main() {
                 .expect("yarn-berry-fetcher missing-hashes <yarn.lock>");
             let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
+            let yarnrc_path = Path::new(&lockfile_path)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(".yarnrc.yml");
+            let registry_tokens = fetch::load_registry_tokens(&yarnrc_path);
 
-            let missing_hashes = missing_hashes::get_missing_hashes(lockfile, cache_version);
+            let missing_hashes =
+                missing_hashes::get_missing_hashes(lockfile, cache_version, &registry_tokens);
 
             println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
         }
@@ -411,6 +422,7 @@ struct Cache {
     out_dir: PathBuf,
     key: CacheKey,
     is_global: bool,
+    registry_tokens: std::collections::HashMap<String, String>,
 }
 
 impl Cache {
