@@ -11,8 +11,8 @@ deko = { version = "0.4.0", default-features = false, features = ["flate2"] }
 dostime = { version = "1.0.0", features = ["chrono-1"] }
 form_urlencoded = "1.2.1"
 hex = "0.4.3"
-oxhttp = { version = "0.3.0", default-features = false, features = ["client", "native-tls"] }
 rayon = "1.10.0"
+reqwest = { version = "0.13.4", features = ["blocking", "native-tls"] }
 retry = "2.1.0"
 semver = "1.0.26"
 serde = { version = "1.0.219", features = ["derive"] }

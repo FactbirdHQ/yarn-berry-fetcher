@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity};
 
-use oxhttp::model::{Body, Request, StatusCode};
 use rayon::prelude::*;
 
 const OUTDATED_MISSING_HASHES_ERR: &str = r#"
@@ -27,7 +26,10 @@ const USER_AGENT: &str = "yarn-berry-fetcher/1";
 const MAX_ATTEMPTS: usize = 5;
 
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
-pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> anyhow::Result<std::fs::File> {
+pub fn fetch_to_tempfile(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> anyhow::Result<std::fs::File> {
     let mut file = tempfile::tempfile().context("opening tempfile")?;
 
     retry::retry_with_index(
@@ -41,14 +43,12 @@ pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> anyhow::Result<s
                 eprintln!("Failed to fetch (on try {prev}/{MAX_ATTEMPTS}): {url}");
             }
 
-            let response =
-                client.request(Request::builder().uri(url).body(Body::empty()).unwrap())?;
-
-            if response.status() != StatusCode::OK {
+            let mut response = client.get(url).body("").send().expect("request to send");
+            if !response.status().is_success() {
                 return Err(std::io::Error::other(format!("{}", response.status())));
             }
 
-            std::io::copy(&mut response.into_body(), &mut file)?;
+            std::io::copy(&mut response, &mut file)?;
             file.seek(std::io::SeekFrom::Start(0))?;
             Ok(())
         },
@@ -110,10 +110,10 @@ impl Cache {
             .into_par_iter()
             .map_init(
                 || {
-                    oxhttp::Client::new()
-                        .with_user_agent(USER_AGENT)
-                        .expect("USER_AGENT to be valid")
-                        .with_redirection_limit(5)
+                    reqwest::blocking::Client::builder()
+                        .user_agent(USER_AGENT)
+                        .build()
+                        .expect("client to build")
                 },
                 |client, (entry, source)| self.fetch_source(client, entry, source),
             )
@@ -124,7 +124,7 @@ impl Cache {
 
     fn fetch_source(
         &self,
-        client: &oxhttp::Client,
+        client: &reqwest::blocking::Client,
         entry: yarn_lock_parser::Entry,
         source: SourceWithIntegrity,
     ) -> anyhow::Result<()> {
@@ -169,7 +169,7 @@ impl Cache {
 
     fn fetch_tgz_and_write_zip(
         &self,
-        client: &oxhttp::Client,
+        client: &reqwest::blocking::Client,
         entry: yarn_lock_parser::Entry,
         url: String,
         integrity: String,

@@ -31,7 +31,7 @@ pub fn get_missing_hashes(
     missing
         .into_par_iter()
         .map_init(
-            oxhttp::Client::new,
+            reqwest::blocking::Client::new,
             |client,
              (entry, SourceWithoutIntegrity::Tgz { url })|
              -> anyhow::Result<(String, String)> {
