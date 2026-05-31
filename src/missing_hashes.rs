@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 
 use crate::{
     CacheKey, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity,
-    fetch::fetch_to_tempfile, zip,
+    fetch::{USER_AGENT, fetch_to_tempfile},
+    zip,
 };
 
+use anyhow::Context;
 use rayon::prelude::*;
 use sha2::{Digest, Sha512};
 
@@ -23,6 +25,11 @@ pub fn get_missing_hashes(
         })
         .collect::<Vec<_>>();
 
+    let http_client = reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .context("building http client")?;
+
     rayon::ThreadPoolBuilder::new()
         .num_threads(20)
         .build_global()
@@ -30,12 +37,9 @@ pub fn get_missing_hashes(
 
     missing
         .into_par_iter()
-        .map_init(
-            reqwest::blocking::Client::new,
-            |client,
-             (entry, SourceWithoutIntegrity::Tgz { url })|
-             -> anyhow::Result<(String, String)> {
-                let f = fetch_to_tempfile(client, &url)?;
+        .map(
+            |(entry, SourceWithoutIntegrity::Tgz { url })| -> anyhow::Result<(String, String)> {
+                let f = fetch_to_tempfile(&http_client, &url)?;
                 eprintln!("Success:  {url}");
 
                 Ok((
