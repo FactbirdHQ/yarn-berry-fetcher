@@ -49,7 +49,7 @@ fn add_ancestors(zip: &mut ZipArchive, included_directories: &mut HashSet<PathBu
 
 pub fn write_yarn_zip(
     package_name: &str,
-    dst: impl AsRef<Path>,
+    dst: PathBuf,
     source_stream: impl std::io::Read,
     compression: Option<u32>,
 ) {
@@ -69,7 +69,7 @@ pub fn write_yarn_zip(
     // As a compromise, we add up to BATCH_SIZE of content to the archive before performing the flush.
     'outer: loop {
         let mut zip = {
-            let src = Source::try_from(dst.as_ref()).unwrap();
+            let src = Source::try_from(AsRef::<Path>::as_ref(&dst)).unwrap();
             if first_open {
                 first_open = false;
                 ZipArchive::open(src, [OpenFlag::Create, OpenFlag::Exclusive]).unwrap()
