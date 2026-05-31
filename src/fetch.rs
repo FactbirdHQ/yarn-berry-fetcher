@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::collections::HashMap;
 use std::io::{Seek, Write};
 use std::path::PathBuf;
@@ -26,10 +27,10 @@ const USER_AGENT: &str = "yarn-berry-fetcher/1";
 const MAX_ATTEMPTS: usize = 5;
 
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
-pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> std::fs::File {
-    let mut file = tempfile::tempfile().unwrap();
+pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> anyhow::Result<std::fs::File> {
+    let mut file = tempfile::tempfile().context("opening tempfile")?;
 
-    match retry::retry_with_index(
+    retry::retry_with_index(
         retry::delay::Exponential::from_millis(500)
             .take(MAX_ATTEMPTS)
             .map(retry::delay::jitter),
@@ -51,17 +52,18 @@ pub fn fetch_to_tempfile(client: &oxhttp::Client, url: &str) -> std::fs::File {
             file.seek(std::io::SeekFrom::Start(0))?;
             Ok(())
         },
-    ) {
-        Ok(_) => file,
-        Err(e) => {
-            eprintln!("Finally gave up on fetching {url}: {e}");
-            std::process::exit(1);
-        }
-    }
+    )
+    .context(format!("gave up fetching {url}"))?;
+
+    Ok(file)
 }
 
 impl Cache {
-    pub fn fetch(&self, lockfile: Lockfile, missing_hashes_path: Option<&str>) {
+    pub fn fetch(
+        &self,
+        lockfile: Lockfile,
+        missing_hashes_path: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mut missing_hashes: HashMap<String, String> = missing_hashes_path
             .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
             .unwrap_or_default();
@@ -104,21 +106,20 @@ impl Cache {
             .build_global()
             .unwrap();
 
-        sources.into_par_iter().panic_fuse().for_each_init(
-            || {
-                oxhttp::Client::new()
-                    .with_user_agent(USER_AGENT)
-                    .expect("USER_AGENT to be valid")
-                    .with_redirection_limit(5)
-            },
-            |client, (entry, source)| {
-                let unwind_result =
-                    std::panic::catch_unwind(|| self.fetch_source(client, entry, source));
-                if unwind_result.is_err() {
-                    std::process::exit(1);
-                }
-            },
-        );
+        sources
+            .into_par_iter()
+            .map_init(
+                || {
+                    oxhttp::Client::new()
+                        .with_user_agent(USER_AGENT)
+                        .expect("USER_AGENT to be valid")
+                        .with_redirection_limit(5)
+                },
+                |client, (entry, source)| self.fetch_source(client, entry, source),
+            )
+            .collect::<anyhow::Result<Vec<()>>>()?;
+
+        Ok(())
     }
 
     fn fetch_source(
@@ -126,16 +127,17 @@ impl Cache {
         client: &oxhttp::Client,
         entry: yarn_lock_parser::Entry,
         source: SourceWithIntegrity,
-    ) {
+    ) -> anyhow::Result<()> {
         match source {
             SourceWithIntegrity::Tgz { url, integrity } => {
-                self.fetch_tgz_and_write_zip(client, entry, url, integrity)
+                self.fetch_tgz_and_write_zip(client, entry, url, integrity)?
             }
-            SourceWithIntegrity::Git { repo, commit, .. } => self.fetch_git(repo, commit),
+            SourceWithIntegrity::Git { repo, commit, .. } => self.fetch_git(repo, commit)?,
         }
+        Ok(())
     }
 
-    fn fetch_git(&self, repo: String, commit: String) {
+    fn fetch_git(&self, repo: String, commit: String) -> anyhow::Result<()> {
         let output = match std::process::Command::new("nix-prefetch-git")
             .arg("--builder")
             .arg(&repo)
@@ -159,9 +161,10 @@ impl Cache {
                 output.status.code()
             );
             std::io::stderr().write_all(&output.stderr).unwrap();
-            std::process::exit(1);
+            anyhow::bail!("nix-prefetch-git failed");
         }
         eprintln!("Success:  git+{repo}#commit={commit}");
+        Ok(())
     }
 
     fn fetch_tgz_and_write_zip(
@@ -170,16 +173,17 @@ impl Cache {
         entry: yarn_lock_parser::Entry,
         url: String,
         integrity: String,
-    ) {
-        let mut file = fetch_to_tempfile(client, &url);
+    ) -> anyhow::Result<()> {
+        let mut file = fetch_to_tempfile(client, &url)?;
 
         if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, &mut file) {
             eprintln!("Fail:     {url}");
             eprintln!("  expected: {integrity}");
             eprintln!("  got:      {out_hash}");
-            std::process::exit(1);
+            anyhow::bail!("got wrong hash");
         } else {
             eprintln!("Success:  {url}");
         }
+        Ok(())
     }
 }

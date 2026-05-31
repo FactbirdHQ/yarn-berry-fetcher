@@ -4,6 +4,7 @@ version = "1.2.3"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
 axfive-libzip = "0.2.3"
 chrono = { version = "0.4.40", default-features = false, features = ["std"] }
 deko = { version = "0.4.0", default-features = false, features = ["flate2"] }

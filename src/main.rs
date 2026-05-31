@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use anyhow::Context;
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
@@ -22,16 +23,23 @@ static SUPPORTED_CACHE_VERSION: LazyLock<usize> = LazyLock::new(|| {
         .unwrap()
 });
 
-fn fetch(lockfile_path: &str, missing_hashes_path: Option<&str>, out_dir: &Path) {
+fn fetch(
+    lockfile_path: &str,
+    missing_hashes_path: Option<&str>,
+    out_dir: &Path,
+) -> anyhow::Result<()> {
     let lockfile_contents =
-        std::fs::read_to_string(lockfile_path).expect("unable to open lockfile");
-    let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
+        std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
+    let (cache_version, lockfile) = parse_lockfile(&lockfile_contents)?;
     let cache = Cache {
         out_dir: out_dir.to_owned(),
         key: cache_version,
         is_global: false,
     };
-    cache.fetch(lockfile, missing_hashes_path);
+    cache
+        .fetch(lockfile, missing_hashes_path)
+        .context("fetching from cache")?;
+
     std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).unwrap();
     if let Some(missing_hashes_path) = missing_hashes_path {
         std::fs::copy(
@@ -40,9 +48,11 @@ fn fetch(lockfile_path: &str, missing_hashes_path: Option<&str>, out_dir: &Path)
         )
         .unwrap();
     }
+
+    Ok(())
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
 
     match args.next().as_deref() {
@@ -52,50 +62,48 @@ fn main() {
                 .expect("yarn-berry-fetcher fetch <yarn.lock> [missing-hashes.json]");
             let missing_hashes_path = args.next();
             let out_dir = PathBuf::from(std::env::var("out").unwrap_or("out".into()));
-            fetch(&lockfile_path, missing_hashes_path.as_deref(), &out_dir)
+            fetch(&lockfile_path, missing_hashes_path.as_deref(), &out_dir)?;
         }
         Some("prefetch") => {
             let lockfile_path = args
                 .next()
                 .expect("yarn-berry-fetcher prefetch <yarn.lock> [missing-hashes.json]");
             let missing_hashes_path = args.next();
-            let tmp_dir = tempfile::TempDir::new().unwrap();
+            let tmp_dir = tempfile::TempDir::new().context("creating tempdir")?;
             fetch(
                 &lockfile_path,
                 missing_hashes_path.as_deref(),
                 tmp_dir.path(),
-            );
+            )?;
 
-            let output = match std::process::Command::new("nix-hash")
+            let output = std::process::Command::new("nix-hash")
                 .arg("--type")
                 .arg("sha256")
                 .arg("--sri")
                 .arg(tmp_dir.path())
                 .output()
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("Error spawning nix-hash: {e}");
-                    std::process::exit(1);
-                }
-            };
+                .context("spawning nix-hash")?;
+
             if !output.status.success() {
                 eprintln!("nix-hash errored:");
                 std::io::stderr().write_all(&output.stderr).unwrap();
                 std::process::exit(1);
             }
 
-            tmp_dir.close().unwrap();
+            tmp_dir.close().context("closing tempdir")?;
             println!("{}", String::from_utf8_lossy(&output.stdout));
         }
         Some("missing-hashes") => {
             let lockfile_path = args
                 .next()
                 .expect("yarn-berry-fetcher missing-hashes <yarn.lock>");
-            let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
-            let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
+            let lockfile_contents =
+                std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
 
-            let missing_hashes = missing_hashes::get_missing_hashes(lockfile, cache_version);
+            let (cache_version, lockfile) = parse_lockfile(&lockfile_contents)?;
+
+            let missing_hashes = missing_hashes::get_missing_hashes(lockfile, cache_version)
+                .context("while getting missing hashes")?;
 
             println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
         }
@@ -133,10 +141,12 @@ convert <full package name> <npm.tgz>
             );
             std::process::exit(1);
         }
-    }
+    };
+
+    Ok(())
 }
 
-fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
+fn parse_lockfile(lockfile_contents: &str) -> anyhow::Result<(CacheKey, Lockfile<'_>)> {
     let cache_version = {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -149,7 +159,7 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
         }
 
         let lockfile: Lockfile = serde_yml::from_str(lockfile_contents)
-            .expect("yarn.lock is not valid YAML. Are you trying to pass a yarn v1 lockfile?");
+            .context("yarn.lock is not valid YAML. Are you trying to pass a yarn v1 lockfile?")?;
         let mut iter = lockfile.__metadata.cache_key.split('c');
         let version_str = iter.next().unwrap();
         let compression_str = iter.next();
@@ -162,21 +172,21 @@ fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
     eprintln!("{cache_version:?}");
 
     if cache_version.version != *SUPPORTED_CACHE_VERSION {
-        eprintln!(
+        anyhow::bail!(
             r#"
 Error fetching berry dependencies.
 Found cache version {}
 Supported by this version of yarn-berry-fetcher: {}
 Hint: Are you using fetchYarnBerryDeps from the correct yarn-berry version?"#,
-            cache_version.version, *SUPPORTED_CACHE_VERSION
+            cache_version.version,
+            *SUPPORTED_CACHE_VERSION
         );
-
-        std::process::exit(1);
     }
 
-    let lockfile = yarn_lock_parser::parse_str(lockfile_contents).unwrap();
+    let lockfile =
+        yarn_lock_parser::parse_str(lockfile_contents).context("parsing yarn.lock file")?;
 
-    (cache_version, lockfile)
+    Ok((cache_version, lockfile))
 }
 
 pub trait EntryExt {

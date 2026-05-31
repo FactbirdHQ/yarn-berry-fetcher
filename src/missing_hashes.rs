@@ -8,7 +8,10 @@ use crate::{
 use rayon::prelude::*;
 use sha2::{Digest, Sha512};
 
-pub fn get_missing_hashes(lockfile: Lockfile, cache_key: CacheKey) -> BTreeMap<String, String> {
+pub fn get_missing_hashes(
+    lockfile: Lockfile,
+    cache_key: CacheKey,
+) -> anyhow::Result<BTreeMap<String, String>> {
     let missing = lockfile
         .entries
         .into_iter()
@@ -25,45 +28,46 @@ pub fn get_missing_hashes(lockfile: Lockfile, cache_key: CacheKey) -> BTreeMap<S
         .build_global()
         .unwrap();
 
-    let x = missing
+    missing
         .into_par_iter()
-        .panic_fuse()
-        .map_init(oxhttp::Client::new, |client, (entry, source)| {
-            let unwind_result = std::panic::catch_unwind(|| {
-                let SourceWithoutIntegrity::Tgz { url } = source;
-                let f = fetch_to_tempfile(client, &url);
+        .map_init(
+            oxhttp::Client::new,
+            |client,
+             (entry, SourceWithoutIntegrity::Tgz { url })|
+             -> anyhow::Result<(String, String)> {
+                let f = fetch_to_tempfile(client, &url)?;
                 eprintln!("Success:  {url}");
 
-                (
+                Ok((
                     entry.resolved.to_string(),
-                    calc_integrity(f, cache_key.compression, &entry.name),
-                )
-            });
-            match unwind_result {
-                Err(_) => std::process::exit(1),
-                Ok(v) => v,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    x.into_iter().collect::<BTreeMap<_, _>>()
+                    calc_integrity(f, cache_key.compression, &entry.name)
+                        .context("calculating integrity")?,
+                ))
+            },
+        )
+        .collect()
 }
 
 /// Calculates the integrity digest, which is the sha512 sum of a specially crafted zipfile,
 /// lowerhex-encoded.
-fn calc_integrity(f: impl std::io::Read, compression: Option<u32>, entry_name: &str) -> String {
+/// This must be written to a named temp file as we call into C here, and that wants a path.
+fn calc_integrity(
+    data: impl std::io::Read,
+    compression: Option<u32>,
+    entry_name: &str,
+) -> anyhow::Result<String> {
     // write_yarn_zip expects to be the first one opening the file,
     // so we create a TempDir and pass it out.zip in that.
-    let zip_dir = tempfile::TempDir::new().expect("tempfile created");
+    let zip_dir = tempfile::TempDir::new().context("creating tempdir")?;
     let zip_path = zip_dir.path().join("out.zip");
-    zip::write_yarn_zip(entry_name, &zip_path, f, compression);
+    zip::write_yarn_zip(entry_name, &zip_path, data, compression);
 
     // hash the produced zip file
     let mut hasher = Sha512::new();
-    let mut zip_file = std::fs::File::open(zip_path).expect("open file again");
-    std::io::copy(&mut zip_file, &mut hasher).unwrap();
+    let mut zip_file = std::fs::File::open(zip_path).context("opening written zipfile")?;
+    std::io::copy(&mut zip_file, &mut hasher).context("hashing the written zipfile")?;
 
-    zip_dir.close().expect("to be able to cleanup the tempdir");
+    zip_dir.close().context("cleaning up the tempdir")?;
 
-    hex::encode(hasher.finalize())
+    Ok(hex::encode(hasher.finalize()))
 }
