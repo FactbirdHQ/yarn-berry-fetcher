@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
 use std::collections::HashMap;
 use std::io::{Seek, Write};
 use std::path::PathBuf;
@@ -27,12 +27,12 @@ const MAX_ATTEMPTS: usize = 5;
 
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
 pub fn fetch_to_tempfile(
-    client: &reqwest::blocking::Client,
+    http_client: &reqwest::blocking::Client,
     url: &str,
 ) -> anyhow::Result<std::fs::File> {
     let mut file = tempfile::tempfile().context("opening tempfile")?;
 
-    retry::retry_with_index(
+    if let Err(err) = retry::retry_with_index(
         retry::delay::Exponential::from_millis(500)
             .take(MAX_ATTEMPTS)
             .map(retry::delay::jitter),
@@ -43,17 +43,26 @@ pub fn fetch_to_tempfile(
                 eprintln!("Failed to fetch (on try {prev}/{MAX_ATTEMPTS}): {url}");
             }
 
-            let mut response = client.get(url).body("").send().expect("request to send");
+            let mut response = http_client
+                .get(url)
+                .send()
+                .context("sending http request")?;
             if !response.status().is_success() {
-                return Err(std::io::Error::other(format!("{}", response.status())));
+                bail!("non-successful HTTP response: {}", response.status())
             }
 
-            std::io::copy(&mut response, &mut file)?;
-            file.seek(std::io::SeekFrom::Start(0))?;
+            std::io::copy(&mut response, &mut file)
+                .context("reading from response into tempfile")?;
+
+            file.seek(std::io::SeekFrom::Start(0))
+                .context("seeking tempfile back to the beginning")?;
             Ok(())
         },
-    )
-    .context(format!("gave up fetching {url}"))?;
+    ) {
+        Err(err
+            .error
+            .context(format!("gave up fetching {url} after {} tries", err.tries)))?
+    }
 
     Ok(file)
 }
