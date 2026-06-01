@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.102"
 axfive-libzip = "0.2.3"
 chrono = { version = "0.4.40", default-features = false, features = ["std"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 deko = { version = "0.4.0", default-features = false, features = ["flate2"] }
 dostime = { version = "1.0.0", features = ["chrono-1"] }
 form_urlencoded = "1.2.1"

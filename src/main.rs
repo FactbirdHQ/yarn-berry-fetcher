@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::Context;
+use clap::Parser;
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
@@ -23,9 +24,50 @@ static SUPPORTED_CACHE_VERSION: LazyLock<usize> = LazyLock::new(|| {
         .unwrap()
 });
 
+#[derive(clap::Parser)]
+struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(PartialEq, Eq, clap::Subcommand)]
+enum Commands {
+    /// Download packages in the given yarn lock file to the $out directory.
+    Fetch {
+        #[clap(value_name = "yarn.lock")]
+        lockfile_path: PathBuf,
+        #[clap(value_name = "missing-hashes.json")]
+        missing_hashes_path: Option<PathBuf>,
+        /// The location to write packages to.
+        /// If unset, the literal directory "out" will be used.
+        #[clap(long, env = "out", default_value = "out")]
+        out_dir: PathBuf,
+    },
+    /// download packages in the given yarn.lock file, and print the appropriate 'nix-hash' for it.
+    Prefetch {
+        #[clap(value_name = "yarn.lock")]
+        lockfile_path: PathBuf,
+        #[clap(value_name = "missing-hashes.json")]
+        missing_hashes_path: Option<PathBuf>,
+    },
+    /// Produce missing hashes data, and print it to stdout.
+    MissingHashes {
+        #[clap(value_name = "yarn.lock")]
+        lockfile_path: PathBuf,
+    },
+    /// Convert an npm tgz file, write it to 'out.zip'.
+    Convert {
+        #[clap(value_name = "full package name")]
+        package_name: String,
+
+        #[clap(value_name = "npm.tgz")]
+        tgz_filename: PathBuf,
+    },
+}
+
 fn fetch(
-    lockfile_path: &str,
-    missing_hashes_path: Option<&str>,
+    lockfile_path: &Path,
+    missing_hashes_path: Option<&Path>,
     out_dir: &Path,
 ) -> anyhow::Result<()> {
     let lockfile_contents =
@@ -53,22 +95,20 @@ fn fetch(
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(1);
+    let args = Args::parse();
 
-    match args.next().as_deref() {
-        Some("fetch") => {
-            let lockfile_path = args
-                .next()
-                .expect("yarn-berry-fetcher fetch <yarn.lock> [missing-hashes.json]");
-            let missing_hashes_path = args.next();
-            let out_dir = PathBuf::from(std::env::var("out").unwrap_or("out".into()));
+    match args.command {
+        Commands::Fetch {
+            lockfile_path,
+            missing_hashes_path,
+            out_dir,
+        } => {
             fetch(&lockfile_path, missing_hashes_path.as_deref(), &out_dir)?;
         }
-        Some("prefetch") => {
-            let lockfile_path = args
-                .next()
-                .expect("yarn-berry-fetcher prefetch <yarn.lock> [missing-hashes.json]");
-            let missing_hashes_path = args.next();
+        Commands::Prefetch {
+            lockfile_path,
+            missing_hashes_path,
+        } => {
             let tmp_dir = tempfile::TempDir::new().context("creating tempdir")?;
             fetch(
                 &lockfile_path,
@@ -93,10 +133,7 @@ fn main() -> anyhow::Result<()> {
             tmp_dir.close().context("closing tempdir")?;
             println!("{}", String::from_utf8_lossy(&output.stdout));
         }
-        Some("missing-hashes") => {
-            let lockfile_path = args
-                .next()
-                .expect("yarn-berry-fetcher missing-hashes <yarn.lock>");
+        Commands::MissingHashes { lockfile_path } => {
             let lockfile_contents =
                 std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
 
@@ -107,41 +144,19 @@ fn main() -> anyhow::Result<()> {
 
             println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
         }
-        Some("convert") => {
-            let help = "yarn-berry-fetcher convert <full package name> <npm.tgz>";
-            let package_name = args.next().expect(help);
+        Commands::Convert {
+            package_name,
+            tgz_filename,
+        } => {
             zip::write_yarn_zip(
                 &package_name,
                 "out.zip",
-                std::fs::File::open(args.next().expect(help)).unwrap(),
+                std::fs::File::open(tgz_filename).unwrap(),
                 None,
             );
             eprintln!("wrote out.zip");
         }
-        _ => {
-            eprintln!(
-                r#"USAGE: yarn-berry-fetcher <fetch|prefetch|missing-hashes|convert> [options]
-
-fetch <yarn.lock> [missing-hashes.json]
-    download packages in the given yarn lock file to the the directory
-    specified by the "$out" environment variable. If "out" is unset,
-    the literal direcory "out" will be used.
-
-prefetch <yarn.lock> [missing-hashes.json]
-    download packages in the given yarn.lock file, and print the
-    appropriate 'nix-hash' for it.
-
-missing-hashes <yarn.lock>
-    Produce the missing-hashes data, and print it to stdout.
-    Other commands expect this as the 'missing-hashes.json'
-    argument.
-
-convert <full package name> <npm.tgz>
-    Convert an npm tgz file, write it to 'out.zip'."#
-            );
-            std::process::exit(1);
-        }
-    };
+    }
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use std::collections::HashMap;
 use std::io::{Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity};
 
@@ -71,7 +71,7 @@ impl Cache {
     pub fn fetch(
         &self,
         lockfile: Lockfile,
-        missing_hashes_path: Option<&str>,
+        missing_hashes_path: Option<&Path>,
     ) -> anyhow::Result<()> {
         let mut missing_hashes: HashMap<String, String> = missing_hashes_path
             .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
