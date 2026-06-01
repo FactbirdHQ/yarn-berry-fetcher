@@ -84,11 +84,9 @@ impl Cache {
             .map(|entry| {
                 let source = match SourceWithIntegrity::try_from(&entry) {
                     Ok(source) => source,
-                    Err(missing_integrity) => {
-                        let SourceWithoutIntegrity::Tgz { url } = missing_integrity;
+                    Err(SourceWithoutIntegrity::Tgz { url }) => {
                         let Some(integrity) = missing_hashes.remove(entry.resolved) else {
-                            eprintln!("{OUTDATED_MISSING_HASHES_ERR}");
-                            std::process::exit(1);
+                            anyhow::bail!("{OUTDATED_MISSING_HASHES_ERR}");
                         };
                         assert_eq!(
                             integrity.len(),
@@ -99,16 +97,15 @@ impl Cache {
                         SourceWithIntegrity::Tgz { url, integrity }
                     }
                 };
-                (entry, source)
+                Ok((entry, source))
             })
-            .collect::<Vec<_>>();
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         if !missing_hashes.is_empty() {
-            eprintln!("{OUTDATED_MISSING_HASHES_ERR}");
-            std::process::exit(1);
+            anyhow::bail!("{OUTDATED_MISSING_HASHES_ERR}");
         }
 
-        std::fs::create_dir_all(PathBuf::from(&self.out_dir).join("cache")).unwrap();
+        std::fs::create_dir_all(self.out_dir.join("cache")).context("creating cache directory")?;
 
         let http_client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)

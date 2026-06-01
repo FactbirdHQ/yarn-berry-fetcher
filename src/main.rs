@@ -82,13 +82,10 @@ fn fetch(
         .fetch(lockfile, missing_hashes_path)
         .context("fetching from cache")?;
 
-    std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).unwrap();
+    std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).context("writing yarn.lock")?;
     if let Some(missing_hashes_path) = missing_hashes_path {
-        std::fs::copy(
-            missing_hashes_path,
-            PathBuf::from(&out_dir).join("missing-hashes.json"),
-        )
-        .unwrap();
+        std::fs::copy(missing_hashes_path, out_dir.join("missing-hashes.json"))
+            .context("writing missing-hashes.json")?;
     }
 
     Ok(())
@@ -142,7 +139,11 @@ fn main() -> anyhow::Result<()> {
             let missing_hashes = missing_hashes::get_missing_hashes(lockfile, cache_version)
                 .context("while getting missing hashes")?;
 
-            println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&missing_hashes)
+                    .context("serializing missing_hashes")?
+            );
         }
         Commands::Convert {
             package_name,
@@ -151,7 +152,7 @@ fn main() -> anyhow::Result<()> {
             zip::write_yarn_zip(
                 &package_name,
                 "out.zip",
-                std::fs::File::open(tgz_filename).unwrap(),
+                std::fs::File::open(tgz_filename).context("opening tgz_filename")?,
                 None,
             );
             eprintln!("wrote out.zip");
