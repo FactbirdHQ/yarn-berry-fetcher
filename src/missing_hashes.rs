@@ -13,6 +13,7 @@ use sha2::{Digest, Sha512};
 pub fn get_missing_hashes(
     lockfile: Lockfile,
     cache_key: CacheKey,
+    http_client: &reqwest::blocking::Client,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let missing = lockfile
         .entries
@@ -24,11 +25,6 @@ pub fn get_missing_hashes(
                 .map(|err| (entry, err))
         })
         .collect::<Vec<_>>();
-
-    let http_client = reqwest::blocking::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .context("building http client")?;
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(20)

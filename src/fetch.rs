@@ -22,7 +22,6 @@ Error fetching berry dependencies:
 Could not fetch git dependency:
 "#;
 
-pub const USER_AGENT: &str = "yarn-berry-fetcher/1";
 const MAX_ATTEMPTS: usize = 5;
 
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
@@ -72,6 +71,7 @@ impl Cache {
         &self,
         lockfile: Lockfile,
         missing_hashes_path: Option<&Path>,
+        http_client: &reqwest::blocking::Client,
     ) -> anyhow::Result<()> {
         let mut missing_hashes: HashMap<String, String> = missing_hashes_path
             .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
@@ -106,11 +106,6 @@ impl Cache {
         }
 
         std::fs::create_dir_all(self.out_dir.join("cache")).context("creating cache directory")?;
-
-        let http_client = reqwest::blocking::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .context("building http client")?;
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(20)

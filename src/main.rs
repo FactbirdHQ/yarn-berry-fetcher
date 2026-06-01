@@ -12,6 +12,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
 
+const USER_AGENT: &str = "yarn-berry-fetcher/1";
+
 #[derive(Debug)]
 struct CacheKey {
     version: usize,
@@ -69,6 +71,7 @@ fn fetch(
     lockfile_path: &Path,
     missing_hashes_path: Option<&Path>,
     out_dir: &Path,
+    http_client: &reqwest::blocking::Client,
 ) -> anyhow::Result<()> {
     let lockfile_contents =
         std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
@@ -79,7 +82,7 @@ fn fetch(
         is_global: false,
     };
     cache
-        .fetch(lockfile, missing_hashes_path)
+        .fetch(lockfile, missing_hashes_path, http_client)
         .context("fetching from cache")?;
 
     std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).context("writing yarn.lock")?;
@@ -94,13 +97,23 @@ fn fetch(
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    let http_client = reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .context("building http client")?;
+
     match args.command {
         Commands::Fetch {
             lockfile_path,
             missing_hashes_path,
             out_dir,
         } => {
-            fetch(&lockfile_path, missing_hashes_path.as_deref(), &out_dir)?;
+            fetch(
+                &lockfile_path,
+                missing_hashes_path.as_deref(),
+                &out_dir,
+                &http_client,
+            )?;
         }
         Commands::Prefetch {
             lockfile_path,
@@ -111,6 +124,7 @@ fn main() -> anyhow::Result<()> {
                 &lockfile_path,
                 missing_hashes_path.as_deref(),
                 tmp_dir.path(),
+                &http_client,
             )?;
 
             let output = std::process::Command::new("nix-hash")
@@ -136,8 +150,9 @@ fn main() -> anyhow::Result<()> {
 
             let (cache_version, lockfile) = parse_lockfile(&lockfile_contents)?;
 
-            let missing_hashes = missing_hashes::get_missing_hashes(lockfile, cache_version)
-                .context("while getting missing hashes")?;
+            let missing_hashes =
+                missing_hashes::get_missing_hashes(lockfile, cache_version, &http_client)
+                    .context("while getting missing hashes")?;
 
             println!(
                 "{}",
