@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     CacheKey, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity,
-    fetch::{USER_AGENT, fetch_to_tempfile},
-    zip,
+    fetch::fetch_to_tempfile, zip,
 };
 
 use anyhow::Context;
