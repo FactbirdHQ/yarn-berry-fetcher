@@ -3,9 +3,9 @@ use crate::{EntryExt, SourceWithIntegrity, SourceWithoutIntegrity};
 
 use super::Cache;
 use anyhow::Context;
-use rayon::prelude::*;
+use futures::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
-use std::io::Write;
+use tokio::io::AsyncWriteExt;
 
 const NIX_PREFETCH_GIT_ERR: &str = r#"
 Error fetching berry dependencies:
@@ -27,10 +27,10 @@ impl Cache<'_> {
     /// Fetches all sources specified in the lockfile with the specified http_client.
     /// Also takes a collection of missing hashes, which will supplement those
     /// in the lockfile.
-    pub fn fetch_all(
+    pub async fn fetch_all(
         &self,
         mut missing_hashes: HashMap<String, String>,
-        http_client: &reqwest::blocking::Client,
+        http_client: &reqwest::Client,
     ) -> anyhow::Result<()> {
         let sources = self
             .lockfile
@@ -61,51 +61,48 @@ impl Cache<'_> {
             anyhow::bail!("{OUTDATED_MISSING_HASHES_ERR}");
         }
 
-        std::fs::create_dir_all(self.out_dir.join("cache")).context("creating cache directory")?;
+        tokio::fs::create_dir_all(self.out_dir.join("cache"))
+            .await
+            .context("creating cache directory")?;
 
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(20)
-            .build_global()
-            .unwrap();
-
-        sources
-            .into_par_iter()
-            .map(|(entry, source)| self.fetch_source(&http_client, entry, source))
-            .collect::<anyhow::Result<Vec<()>>>()?;
+        futures::stream::iter(sources)
+            .map(|(entry, source)| async move {
+                self.fetch_source(http_client, entry, source).await
+            })
+            .buffer_unordered(20)
+            .try_collect::<Vec<()>>()
+            .await?;
 
         Ok(())
     }
 
-    fn fetch_source(
+    async fn fetch_source(
         &self,
-        client: &reqwest::blocking::Client,
-        entry: &yarn_lock_parser::Entry,
+        client: &reqwest::Client,
+        entry: &yarn_lock_parser::Entry<'_>,
         source: SourceWithIntegrity,
     ) -> anyhow::Result<()> {
         match source {
             SourceWithIntegrity::Tgz { url, integrity } => {
-                self.fetch_tgz_and_write_zip(client, entry, url, integrity)?
+                self.fetch_tgz_and_write_zip(client, entry, url, integrity)
+                    .await?
             }
-            SourceWithIntegrity::Git { repo, commit, .. } => self.fetch_git(repo, commit)?,
+            SourceWithIntegrity::Git { repo, commit, .. } => self.fetch_git(repo, commit).await?,
         }
         Ok(())
     }
 
-    fn fetch_git(&self, repo: String, commit: String) -> anyhow::Result<()> {
-        let output = match std::process::Command::new("nix-prefetch-git")
+    async fn fetch_git(&self, repo: String, commit: String) -> anyhow::Result<()> {
+        let output = async_process::Command::new("nix-prefetch-git")
             .arg("--builder")
             .arg(&repo)
             .arg(&commit)
             .arg("--out")
-            .arg(&self.out_dir.join("checkouts").join(&commit))
+            .arg(self.out_dir.join("checkouts").join(&commit))
             .output()
-        {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Error spawning nix-prefetch-git: {e}");
-                std::process::exit(1);
-            }
-        };
+            .await
+            .context("spawning nix-prefetch-git")?;
+
         if !output.status.success() {
             eprintln!(
                 "{}\n  repo: {}\n  commit: {}\n  status: {:?}\n  stderr:",
@@ -114,23 +111,23 @@ impl Cache<'_> {
                 commit,
                 output.status.code()
             );
-            std::io::stderr().write_all(&output.stderr).unwrap();
+            tokio::io::stderr().write_all(&output.stderr).await.unwrap();
             anyhow::bail!("nix-prefetch-git failed");
         }
         eprintln!("Success:  git+{repo}#commit={commit}");
         Ok(())
     }
 
-    fn fetch_tgz_and_write_zip(
+    async fn fetch_tgz_and_write_zip(
         &self,
-        client: &reqwest::blocking::Client,
-        entry: &yarn_lock_parser::Entry,
+        client: &reqwest::Client,
+        entry: &yarn_lock_parser::Entry<'_>,
         url: String,
         integrity: String,
     ) -> anyhow::Result<()> {
-        let mut file = fetch_to_tempfile(client, &url)?;
+        let file = fetch_to_tempfile(client, &url).await?;
 
-        if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, &mut file) {
+        if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, file).await {
             eprintln!("Fail:     {url}");
             eprintln!("  expected: {integrity}");
             eprintln!("  got:      {out_hash}");

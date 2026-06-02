@@ -4,12 +4,12 @@ mod missing_hashes;
 mod zip;
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::Context;
 use clap::Parser;
+use tokio::io::AsyncWriteExt;
 use yarn_lock_parser::Lockfile;
 
 use crate::cache::Cache;
@@ -63,14 +63,15 @@ enum Commands {
     },
 }
 
-fn fetch(
+async fn fetch(
     lockfile_path: &Path,
     missing_hashes_path: Option<impl AsRef<Path>>,
     out_dir: &Path,
-    http_client: &reqwest::blocking::Client,
+    http_client: &reqwest::Client,
 ) -> anyhow::Result<()> {
-    let lockfile_contents =
-        &std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
+    let lockfile_contents = &tokio::fs::read_to_string(&lockfile_path)
+        .await
+        .context("reading lockfile contents")?;
     let lockfile = parse_lockfile_ensure_version(lockfile_contents).context("parsing lockfile")?;
 
     let missing_hashes: HashMap<String, String> = missing_hashes_path
@@ -85,9 +86,12 @@ fn fetch(
     let cache = Cache::open(out_dir, lockfile);
     cache
         .fetch_all(missing_hashes, http_client)
+        .await
         .context("fetching all sources")?;
 
-    std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).context("writing yarn.lock")?;
+    tokio::fs::write(out_dir.join("yarn.lock"), &lockfile_contents)
+        .await
+        .context("writing yarn.lock")?;
     if let Some(missing_hashes_path) = missing_hashes_path {
         std::fs::copy(missing_hashes_path, out_dir.join("missing-hashes.json"))
             .context("writing missing-hashes.json")?;
@@ -96,10 +100,11 @@ fn fetch(
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let http_client = reqwest::blocking::Client::builder()
+    let http_client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .build()
         .context("building http client")?;
@@ -110,7 +115,7 @@ fn main() -> anyhow::Result<()> {
             missing_hashes_path,
             out_dir,
         } => {
-            fetch(&lockfile_path, missing_hashes_path, &out_dir, &http_client)?;
+            fetch(&lockfile_path, missing_hashes_path, &out_dir, &http_client).await?;
         }
         Commands::Prefetch {
             lockfile_path,
@@ -122,32 +127,36 @@ fn main() -> anyhow::Result<()> {
                 missing_hashes_path,
                 tmp_dir.path(),
                 &http_client,
-            )?;
+            )
+            .await?;
 
-            let output = std::process::Command::new("nix-hash")
+            let output = async_process::Command::new("nix-hash")
                 .arg("--type")
                 .arg("sha256")
                 .arg("--sri")
                 .arg(tmp_dir.path())
                 .output()
+                .await
                 .context("spawning nix-hash")?;
 
             if !output.status.success() {
                 eprintln!("nix-hash errored:");
-                std::io::stderr().write_all(&output.stderr).unwrap();
-                std::process::exit(1);
+                tokio::io::stderr().write_all(&output.stderr).await.unwrap();
+                anyhow::bail!("nix-hash errored")
             }
 
             tmp_dir.close().context("closing tempdir")?;
             println!("{}", String::from_utf8_lossy(&output.stdout));
         }
         Commands::MissingHashes { lockfile_path } => {
-            let lockfile_contents =
-                std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
+            let lockfile_contents = tokio::fs::read_to_string(&lockfile_path)
+                .await
+                .context("reading lockfile contents")?;
 
-            let lockfile = parse_lockfile_ensure_version(&lockfile_contents)?;
+            let lockfile = parse_lockfile_ensure_version(lockfile_contents.as_str())?;
 
             let missing_hashes = missing_hashes::get_missing_hashes(lockfile, &http_client)
+                .await
                 .context("while getting missing hashes")?;
 
             println!(
@@ -160,12 +169,15 @@ fn main() -> anyhow::Result<()> {
             package_name,
             tgz_filename,
         } => {
-            zip::write_yarn_zip(
-                &package_name,
-                "out.zip",
-                std::fs::File::open(tgz_filename).context("opening tgz_filename")?,
+            zip::write_yarn_zip_async(
+                package_name,
+                "out.zip".into(),
+                tokio::fs::File::open(tgz_filename)
+                    .await
+                    .context("opening tgz_filename")?,
                 None,
-            );
+            )
+            .await?;
             eprintln!("wrote out.zip");
         }
     }

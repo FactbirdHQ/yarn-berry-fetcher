@@ -6,6 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
+use anyhow::Context;
 use axfive_libzip::archive::{Archive as ZipArchive, OpenFlag};
 use axfive_libzip::error::Zip as ZipError;
 use axfive_libzip::file::{Compression, Encoding};
@@ -13,6 +14,7 @@ use axfive_libzip::source::Source;
 use chrono::DateTime;
 use deko::read::AnyDecoder;
 use dostime::DOSDateTime;
+use tokio_util::io::SyncIoBridge;
 
 // https://github.com/yarnpkg/berry/blob/e06bacdb8091b7a25fdb7911c3466184b94fa040/packages/yarnpkg-fslib/sources/constants.ts#L15
 static SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
@@ -47,13 +49,38 @@ fn add_ancestors(zip: &mut ZipArchive, included_directories: &mut HashSet<PathBu
     .unwrap();
 }
 
-pub fn write_yarn_zip(
+pub async fn write_yarn_zip_async<R>(
+    package_name: String,
+    path: PathBuf,
+    reader: R,
+    compression: Option<u32>,
+) -> anyhow::Result<R>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let reader = tokio::task::spawn_blocking({
+        move || {
+            let mut reader_sync = SyncIoBridge::new(reader);
+            write_yarn_zip(&package_name, path, &mut reader_sync, compression);
+            reader_sync.into_inner()
+        }
+    })
+    .await
+    .context("spawning write_yarn_zip task")?;
+
+    Ok(reader)
+}
+
+/// Writes a specially crafted zipfile to the given destination.
+/// The zipfile may not exist before calling this function.
+/// This function is sync and does do blocking IO, it needs to be wrapped in a spawn_blocking call.
+fn write_yarn_zip(
     package_name: &str,
-    dst: impl AsRef<Path>,
-    source_stream: impl std::io::Read,
+    path: impl AsRef<Path>,
+    reader: impl std::io::Read,
     compression: Option<u32>,
 ) {
-    let mut tar = tar::Archive::new(AnyDecoder::new(source_stream));
+    let mut tar = tar::Archive::new(AnyDecoder::new(reader));
 
     let mut included_directories = HashSet::new();
 
@@ -69,7 +96,7 @@ pub fn write_yarn_zip(
     // As a compromise, we add up to BATCH_SIZE of content to the archive before performing the flush.
     'outer: loop {
         let mut zip = {
-            let src = Source::try_from(dst.as_ref()).unwrap();
+            let src = Source::try_from(path.as_ref()).unwrap();
             if first_open {
                 first_open = false;
                 ZipArchive::open(src, [OpenFlag::Create, OpenFlag::Exclusive]).unwrap()

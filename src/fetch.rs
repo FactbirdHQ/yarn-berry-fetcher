@@ -1,47 +1,77 @@
-use anyhow::{Context, bail};
-
-use std::io::Seek;
+use anyhow::{self, Context};
+use tokio::io::AsyncSeekExt;
+use tokio_retry2::{
+    Retry, RetryError,
+    strategy::{ExponentialFactorBackoff, jitter},
+};
 
 const MAX_ATTEMPTS: usize = 5;
 
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
-pub fn fetch_to_tempfile(
-    http_client: &reqwest::blocking::Client,
+pub async fn fetch_to_tempfile(
+    http_client: &reqwest::Client,
     url: &str,
-) -> anyhow::Result<std::fs::File> {
-    let mut file = tempfile::tempfile().context("opening tempfile")?;
+) -> Result<async_tempfile::TempFile, anyhow::Error> {
+    let i = std::sync::atomic::AtomicUsize::new(0);
 
-    if let Err(err) = retry::retry_with_index(
-        retry::delay::Exponential::from_millis(500)
-            .take(MAX_ATTEMPTS)
-            .map(retry::delay::jitter),
-        |i| {
-            // i is the number of the try, so starts from 1, not 0.
-            if i != 1 {
-                let prev = i - 1;
-                eprintln!("Failed to fetch (on try {prev}/{MAX_ATTEMPTS}): {url}");
-            }
+    let action = async || -> Result<async_tempfile::TempFile, RetryError<anyhow::Error>> {
+        let i = i.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if i != 0 {
+            let prev = i - 1;
+            eprintln!("Failed to fetch (on try {prev}/{MAX_ATTEMPTS}): {url}");
+        }
 
-            let mut response = http_client
-                .get(url)
-                .send()
-                .context("sending http request")?;
-            if !response.status().is_success() {
-                bail!("non-successful HTTP response: {}", response.status())
-            }
+        let mut file = async_tempfile::TempFile::new()
+            .await
+            .context("opening tempfile")
+            .map_err(RetryError::Permanent)?;
 
-            std::io::copy(&mut response, &mut file)
-                .context("reading from response into tempfile")?;
+        let mut response = http_client
+            .get(url)
+            .send()
+            .await
+            .context("sending http request")
+            .map_err(|err| RetryError::Transient {
+                err,
+                // use normal retry behaviour
+                retry_after: None,
+            })?;
 
-            file.seek(std::io::SeekFrom::Start(0))
-                .context("seeking tempfile back to the beginning")?;
-            Ok(())
-        },
-    ) {
-        Err(err
-            .error
-            .context(format!("gave up fetching {url} after {} tries", err.tries)))?
-    }
+        if !response.status().is_success() {
+            return RetryError::to_transient(anyhow::anyhow!(
+                "non-successful HTTP response: {}",
+                response.status()
+            ));
+        }
 
-    Ok(file)
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("reading response chunk")
+            .map_err(|err| RetryError::Transient {
+                err,
+                retry_after: None,
+            })?
+        {
+            tokio::io::copy(&mut std::io::Cursor::new(chunk), &mut file)
+                .await
+                .context("copying response chunk into tempfile")
+                .map_err(RetryError::Permanent)?;
+        }
+
+        file.seek(std::io::SeekFrom::Start(0))
+            .await
+            .context("seeking tempfile back to the beginning")
+            .map_err(RetryError::Permanent)?;
+
+        Ok(file)
+    };
+
+    let retry_strategy = ExponentialFactorBackoff::from_millis(500, 2.0)
+        .map(jitter)
+        .take(MAX_ATTEMPTS);
+
+    Retry::spawn(retry_strategy, action)
+        .await
+        .context("finally gave up fetching")
 }

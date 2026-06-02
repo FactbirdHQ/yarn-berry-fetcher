@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
 
-use crate::{EntryExt, LockfileExt, zip};
+use crate::{EntryExt, LockfileExt, missing_hashes::write_zip_and_calc_integrity};
 
 mod fetch;
 
@@ -56,30 +56,26 @@ impl Cache<'_> {
         )
     }
 
-    fn write_zip_and_check(
+    async fn write_zip_and_check(
         &self,
-        entry: &yarn_lock_parser::Entry,
+        entry: &yarn_lock_parser::Entry<'_>,
         integrity: &str,
-        source: impl std::io::Read,
-    ) -> Result<PathBuf, String> {
-        let dst = self
+        reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    ) -> Result<(), String> {
+        let path = self
             .out_dir
             .join("cache")
-            .join(self.zip_name(&entry, integrity));
+            .join(self.zip_name(entry, integrity));
 
-        zip::write_yarn_zip(entry.name(), &dst, source, self.cache_key_compression());
+        let actual_integrity =
+            write_zip_and_calc_integrity(reader, path, self.cache_key_compression(), entry.name())
+                .await
+                .expect("writing zip and calculating integrity");
 
-        let out_hash = {
-            let mut hasher = Sha512::new();
-            let mut file = std::fs::File::open(&dst).unwrap();
-            std::io::copy(&mut file, &mut hasher).unwrap();
-            hex::encode(hasher.finalize())
-        };
-
-        if integrity == out_hash {
-            Ok(dst)
+        if integrity == actual_integrity {
+            Ok(())
         } else {
-            Err(out_hash)
+            Err(actual_integrity)
         }
     }
 }

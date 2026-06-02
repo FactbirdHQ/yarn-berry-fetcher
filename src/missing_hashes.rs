@@ -1,17 +1,16 @@
-use std::collections::BTreeMap;
-
 use crate::{
     EntryExt, Lockfile, LockfileExt, SourceWithIntegrity, SourceWithoutIntegrity,
     fetch::fetch_to_tempfile, zip,
 };
-
 use anyhow::Context;
-use rayon::prelude::*;
+use futures::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha512};
+use std::{collections::BTreeMap, path::PathBuf};
+use tokio_util::io::InspectReader;
 
-pub fn get_missing_hashes(
-    lockfile: Lockfile,
-    http_client: &reqwest::blocking::Client,
+pub async fn get_missing_hashes(
+    lockfile: Lockfile<'_>,
+    http_client: &reqwest::Client,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let (_cache_key, compression) = lockfile
         .cache_key_parsed()
@@ -28,47 +27,55 @@ pub fn get_missing_hashes(
         })
         .collect::<Vec<_>>();
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(20)
-        .build_global()
-        .unwrap();
+    futures::stream::iter(missing)
+        .map(|(entry, SourceWithoutIntegrity::Tgz { url })| async move {
+            let f = fetch_to_tempfile(http_client, &url).await?;
+            eprintln!("Success:  {url}");
 
-    missing
-        .into_par_iter()
-        .map(
-            |(entry, SourceWithoutIntegrity::Tgz { url })| -> anyhow::Result<(String, String)> {
-                let f = fetch_to_tempfile(&http_client, &url)?;
-                eprintln!("Success:  {url}");
+            let zip_dir = async_tempfile::TempDir::new()
+                .await
+                .context("creating tempdir")?;
 
-                Ok((
-                    entry.resolved.to_string(),
-                    calc_integrity(f, compression, &entry.name).context("calculating integrity")?,
-                ))
-            },
-        )
-        .collect()
+            // write_yarn_zip expects to be the first one opening the file,
+            // so we create a TempDir and pass it out.zip in that.
+            let zip_path = zip_dir.dir_path().join("out.zip");
+
+            let integrity = write_zip_and_calc_integrity(f, zip_path, compression, entry.name)
+                .await
+                .context("calculating integrity")?;
+
+            zip_dir.drop_async().await;
+
+            Ok::<_, anyhow::Error>((entry.resolved.to_string(), integrity))
+        })
+        .buffer_unordered(20)
+        .try_collect::<BTreeMap<_, _>>()
+        .await
 }
 
 /// Calculates the integrity digest, which is the sha512 sum of a specially crafted zipfile,
 /// lowerhex-encoded.
-/// This must be written to a named temp file as we call into C here, and that wants a path.
-fn calc_integrity(
-    data: impl std::io::Read,
+/// This must be written to a named file as we call into C here, and that wants a path.
+pub async fn write_zip_and_calc_integrity(
+    reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    path: PathBuf,
     compression: Option<u32>,
     entry_name: &str,
 ) -> anyhow::Result<String> {
-    // write_yarn_zip expects to be the first one opening the file,
-    // so we create a TempDir and pass it out.zip in that.
-    let zip_dir = tempfile::TempDir::new().context("creating tempdir")?;
-    let zip_path = zip_dir.path().join("out.zip");
-    zip::write_yarn_zip(entry_name, &zip_path, data, compression);
+    zip::write_yarn_zip_async(entry_name.to_owned(), path.clone(), reader, compression).await?;
 
     // hash the produced zip file
-    let mut hasher = Sha512::new();
-    let mut zip_file = std::fs::File::open(zip_path).context("opening written zipfile")?;
-    std::io::copy(&mut zip_file, &mut hasher).context("hashing the written zipfile")?;
+    let zip_file = tokio::fs::File::open(&path)
+        .await
+        .context("opening written zipfile")?;
 
-    zip_dir.close().context("cleaning up the tempdir")?;
+    let mut hasher = Sha512::new();
+    let mut r = InspectReader::new(zip_file, |d| {
+        hasher.update(d);
+    });
+    tokio::io::copy(&mut r, &mut tokio::io::sink())
+        .await
+        .context("reading the written zipfile")?;
 
     Ok(hex::encode(hasher.finalize()))
 }
