@@ -79,7 +79,6 @@ fn fetch(
     let cache = Cache {
         out_dir: out_dir.to_owned(),
         key: cache_version,
-        is_global: false,
     };
     cache
         .fetch(lockfile, missing_hashes_path, http_client)
@@ -451,7 +450,6 @@ enum SourceWithIntegrity {
 struct Cache {
     out_dir: PathBuf,
     key: CacheKey,
-    is_global: bool,
 }
 
 impl Cache {
@@ -471,7 +469,7 @@ impl Cache {
             "{}-{}-{}.zip",
             entry.slug(),
             &locator_hash[..10],
-            if self.is_global || !entry.is_content_addressed() {
+            if !entry.is_content_addressed() {
                 format!(
                     "{}{}",
                     self.key.version,
