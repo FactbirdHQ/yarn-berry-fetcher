@@ -2,6 +2,7 @@ mod fetch;
 mod missing_hashes;
 mod zip;
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -69,20 +70,31 @@ enum Commands {
 
 fn fetch(
     lockfile_path: &Path,
-    missing_hashes_path: Option<&Path>,
+    missing_hashes_path: Option<impl AsRef<Path>>,
     out_dir: &Path,
     http_client: &reqwest::blocking::Client,
 ) -> anyhow::Result<()> {
     let lockfile_contents =
-        std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
-    let (cache_version, lockfile) = parse_lockfile(&lockfile_contents)?;
+        &std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
+    let (cache_version, lockfile) =
+        parse_lockfile(lockfile_contents).context("parsing lockfile")?;
+
+    let missing_hashes: HashMap<String, String> = missing_hashes_path
+        .as_ref()
+        .map(|path| {
+            serde_json::from_slice(&std::fs::read(path).context("reading missing-hashes.json")?)
+                .context("parsing missing-hashes.json")
+        })
+        .transpose()?
+        .unwrap_or_default();
+
     let cache = Cache {
         out_dir: out_dir.to_owned(),
         key: cache_version,
     };
     cache
-        .fetch(lockfile, missing_hashes_path, http_client)
-        .context("fetching from cache")?;
+        .fetch_all(lockfile, missing_hashes, http_client)
+        .context("fetching all sources")?;
 
     std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).context("writing yarn.lock")?;
     if let Some(missing_hashes_path) = missing_hashes_path {
@@ -107,12 +119,7 @@ fn main() -> anyhow::Result<()> {
             missing_hashes_path,
             out_dir,
         } => {
-            fetch(
-                &lockfile_path,
-                missing_hashes_path.as_deref(),
-                &out_dir,
-                &http_client,
-            )?;
+            fetch(&lockfile_path, missing_hashes_path, &out_dir, &http_client)?;
         }
         Commands::Prefetch {
             lockfile_path,
@@ -121,7 +128,7 @@ fn main() -> anyhow::Result<()> {
             let tmp_dir = tempfile::TempDir::new().context("creating tempdir")?;
             fetch(
                 &lockfile_path,
-                missing_hashes_path.as_deref(),
+                missing_hashes_path,
                 tmp_dir.path(),
                 &http_client,
             )?;

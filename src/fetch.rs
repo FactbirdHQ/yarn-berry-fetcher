@@ -67,16 +67,15 @@ pub fn fetch_to_tempfile(
 }
 
 impl Cache {
-    pub fn fetch(
+    /// Fetches all sources specified in the lockfile with the specified http_client.
+    /// Also takes a collection of missing hashes, which will supplement those
+    /// in the lockfile.
+    pub fn fetch_all(
         &self,
         lockfile: Lockfile,
-        missing_hashes_path: Option<&Path>,
+        mut missing_hashes: HashMap<String, String>,
         http_client: &reqwest::blocking::Client,
     ) -> anyhow::Result<()> {
-        let mut missing_hashes: HashMap<String, String> = missing_hashes_path
-            .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
-            .unwrap_or_default();
-
         let sources = lockfile
             .entries
             .into_iter()
