@@ -31,6 +31,7 @@ impl Cache<'_> {
         &self,
         mut missing_hashes: HashMap<String, String>,
         http_client: &reqwest::Client,
+        fetch_concurrency: usize,
     ) -> anyhow::Result<()> {
         let sources = self
             .lockfile
@@ -69,7 +70,7 @@ impl Cache<'_> {
             .map(|(entry, source)| async move {
                 self.fetch_source(http_client, entry, source).await
             })
-            .buffer_unordered(20)
+            .buffer_unordered(fetch_concurrency)
             .try_collect::<Vec<()>>()
             .await?;
 

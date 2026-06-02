@@ -11,6 +11,7 @@ use tokio_util::io::InspectReader;
 pub async fn get_missing_hashes(
     lockfile: Lockfile<'_>,
     http_client: &reqwest::Client,
+    fetch_concurrency: usize,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let (_cache_key, compression) = lockfile
         .cache_key_parsed()
@@ -48,7 +49,7 @@ pub async fn get_missing_hashes(
 
             Ok::<_, anyhow::Error>((entry.resolved.to_string(), integrity))
         })
-        .buffer_unordered(20)
+        .buffer_unordered(fetch_concurrency)
         .try_collect::<BTreeMap<_, _>>()
         .await
 }

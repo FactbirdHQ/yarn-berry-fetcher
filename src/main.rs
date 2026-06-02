@@ -24,6 +24,10 @@ static SUPPORTED_CACHE_VERSION: LazyLock<u8> = LazyLock::new(|| {
 
 #[derive(clap::Parser)]
 struct Args {
+    /// Up to how many fetches to do concurrently.
+    #[clap(long, default_value_t = 20)]
+    fetch_concurrency: usize,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -68,6 +72,7 @@ async fn fetch(
     missing_hashes_path: Option<impl AsRef<Path>>,
     out_dir: &Path,
     http_client: &reqwest::Client,
+    fetch_concurrency: usize,
 ) -> anyhow::Result<()> {
     let lockfile_contents = &tokio::fs::read_to_string(&lockfile_path)
         .await
@@ -85,7 +90,7 @@ async fn fetch(
 
     let cache = Cache::open(out_dir, lockfile);
     cache
-        .fetch_all(missing_hashes, http_client)
+        .fetch_all(missing_hashes, http_client, fetch_concurrency)
         .await
         .context("fetching all sources")?;
 
@@ -115,7 +120,14 @@ async fn main() -> anyhow::Result<()> {
             missing_hashes_path,
             out_dir,
         } => {
-            fetch(&lockfile_path, missing_hashes_path, &out_dir, &http_client).await?;
+            fetch(
+                &lockfile_path,
+                missing_hashes_path,
+                &out_dir,
+                &http_client,
+                args.fetch_concurrency,
+            )
+            .await?;
         }
         Commands::Prefetch {
             lockfile_path,
@@ -127,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
                 missing_hashes_path,
                 tmp_dir.path(),
                 &http_client,
+                args.fetch_concurrency,
             )
             .await?;
 
@@ -155,9 +168,10 @@ async fn main() -> anyhow::Result<()> {
 
             let lockfile = parse_lockfile_ensure_version(lockfile_contents.as_str())?;
 
-            let missing_hashes = missing_hashes::get_missing_hashes(lockfile, &http_client)
-                .await
-                .context("while getting missing hashes")?;
+            let missing_hashes =
+                missing_hashes::get_missing_hashes(lockfile, &http_client, args.fetch_concurrency)
+                    .await
+                    .context("while getting missing hashes")?;
 
             println!(
                 "{}",
