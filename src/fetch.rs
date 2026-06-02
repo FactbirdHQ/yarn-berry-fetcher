@@ -2,7 +2,7 @@ use anyhow::{Context, bail};
 use std::collections::HashMap;
 use std::io::{Seek, Write};
 
-use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity};
+use crate::{Cache, EntryExt, SourceWithIntegrity, SourceWithoutIntegrity};
 
 use rayon::prelude::*;
 
@@ -65,22 +65,22 @@ pub fn fetch_to_tempfile(
     Ok(file)
 }
 
-impl Cache {
+impl Cache<'_> {
     /// Fetches all sources specified in the lockfile with the specified http_client.
     /// Also takes a collection of missing hashes, which will supplement those
     /// in the lockfile.
     pub fn fetch_all(
         &self,
-        lockfile: Lockfile,
         mut missing_hashes: HashMap<String, String>,
         http_client: &reqwest::blocking::Client,
     ) -> anyhow::Result<()> {
-        let sources = lockfile
+        let sources = self
+            .lockfile
             .entries
-            .into_iter()
-            .filter(EntryExt::is_real_source)
+            .iter()
+            .filter(|x| x.is_real_source())
             .map(|entry| {
-                let source = match SourceWithIntegrity::try_from(&entry) {
+                let source = match SourceWithIntegrity::try_from(entry) {
                     Ok(source) => source,
                     Err(SourceWithoutIntegrity::Tgz { url }) => {
                         let Some(integrity) = missing_hashes.remove(entry.resolved) else {
@@ -121,7 +121,7 @@ impl Cache {
     fn fetch_source(
         &self,
         client: &reqwest::blocking::Client,
-        entry: yarn_lock_parser::Entry,
+        entry: &yarn_lock_parser::Entry,
         source: SourceWithIntegrity,
     ) -> anyhow::Result<()> {
         match source {
@@ -166,7 +166,7 @@ impl Cache {
     fn fetch_tgz_and_write_zip(
         &self,
         client: &reqwest::blocking::Client,
-        entry: yarn_lock_parser::Entry,
+        entry: &yarn_lock_parser::Entry,
         url: String,
         integrity: String,
     ) -> anyhow::Result<()> {

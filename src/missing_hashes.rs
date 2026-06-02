@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    CacheKey, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity,
+    EntryExt, Lockfile, LockfileExt, SourceWithIntegrity, SourceWithoutIntegrity,
     fetch::fetch_to_tempfile, zip,
 };
 
@@ -11,9 +11,12 @@ use sha2::{Digest, Sha512};
 
 pub fn get_missing_hashes(
     lockfile: Lockfile,
-    cache_key: CacheKey,
     http_client: &reqwest::blocking::Client,
 ) -> anyhow::Result<BTreeMap<String, String>> {
+    let (_cache_key, compression) = lockfile
+        .cache_key_parsed()
+        .expect("validated lockfile to have cache_key");
+
     let missing = lockfile
         .entries
         .into_iter()
@@ -39,8 +42,7 @@ pub fn get_missing_hashes(
 
                 Ok((
                     entry.resolved.to_string(),
-                    calc_integrity(f, cache_key.compression, &entry.name)
-                        .context("calculating integrity")?,
+                    calc_integrity(f, compression, &entry.name).context("calculating integrity")?,
                 ))
             },
         )

@@ -9,19 +9,12 @@ use std::sync::LazyLock;
 
 use anyhow::Context;
 use clap::Parser;
-use serde::Deserialize;
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
 
 const USER_AGENT: &str = "yarn-berry-fetcher/1";
 
-#[derive(Debug)]
-struct CacheKey {
-    version: usize,
-    compression: Option<u32>,
-}
-
-static SUPPORTED_CACHE_VERSION: LazyLock<usize> = LazyLock::new(|| {
+static SUPPORTED_CACHE_VERSION: LazyLock<u8> = LazyLock::new(|| {
     std::env!("YARN_ZIP_SUPPORTED_CACHE_VERSION")
         .parse()
         .unwrap()
@@ -76,8 +69,7 @@ fn fetch(
 ) -> anyhow::Result<()> {
     let lockfile_contents =
         &std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
-    let (cache_version, lockfile) =
-        parse_lockfile(lockfile_contents).context("parsing lockfile")?;
+    let lockfile = parse_lockfile_ensure_version(lockfile_contents).context("parsing lockfile")?;
 
     let missing_hashes: HashMap<String, String> = missing_hashes_path
         .as_ref()
@@ -90,10 +82,10 @@ fn fetch(
 
     let cache = Cache {
         out_dir: out_dir.to_owned(),
-        key: cache_version,
+        lockfile,
     };
     cache
-        .fetch_all(lockfile, missing_hashes, http_client)
+        .fetch_all(missing_hashes, http_client)
         .context("fetching all sources")?;
 
     std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).context("writing yarn.lock")?;
@@ -154,11 +146,10 @@ fn main() -> anyhow::Result<()> {
             let lockfile_contents =
                 std::fs::read_to_string(&lockfile_path).context("reading lockfile contents")?;
 
-            let (cache_version, lockfile) = parse_lockfile(&lockfile_contents)?;
+            let lockfile = parse_lockfile_ensure_version(&lockfile_contents)?;
 
-            let missing_hashes =
-                missing_hashes::get_missing_hashes(lockfile, cache_version, &http_client)
-                    .context("while getting missing hashes")?;
+            let missing_hashes = missing_hashes::get_missing_hashes(lockfile, &http_client)
+                .context("while getting missing hashes")?;
 
             println!(
                 "{}",
@@ -183,47 +174,62 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_lockfile(lockfile_contents: &str) -> anyhow::Result<(CacheKey, Lockfile<'_>)> {
-    let cache_version = {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct LockfileMetadata {
-            cache_key: String,
-        }
-        #[derive(Deserialize)]
-        struct Lockfile {
-            __metadata: LockfileMetadata,
-        }
+/// Parses the lockfile contents and ensures it's a supported version.
+fn parse_lockfile_ensure_version(lockfile_contents: &str) -> anyhow::Result<Lockfile<'_>> {
+    let lockfile =
+        yarn_lock_parser::parse_str(lockfile_contents).context("parsing yarn.lock file")?;
 
-        let lockfile: Lockfile = serde_yml::from_str(lockfile_contents)
-            .context("yarn.lock is not valid YAML. Are you trying to pass a yarn v1 lockfile?")?;
-        let mut iter = lockfile.__metadata.cache_key.split('c');
-        let version_str = iter.next().unwrap();
-        let compression_str = iter.next();
-        CacheKey {
-            version: version_str.parse().unwrap(),
-            compression: compression_str.map(|c| c.parse().unwrap()),
-        }
-    };
-
-    eprintln!("{cache_version:?}");
-
-    if cache_version.version != *SUPPORTED_CACHE_VERSION {
-        anyhow::bail!(
-            r#"
+    match lockfile.cache_key_parsed() {
+        Some((cache_key_version, _compression)) => {
+            if cache_key_version != *SUPPORTED_CACHE_VERSION {
+                anyhow::bail!(
+                    r#"
 Error fetching berry dependencies.
 Found cache version {}
 Supported by this version of yarn-berry-fetcher: {}
 Hint: Are you using fetchYarnBerryDeps from the correct yarn-berry version?"#,
-            cache_version.version,
-            *SUPPORTED_CACHE_VERSION
-        );
+                    lockfile.version,
+                    *SUPPORTED_CACHE_VERSION
+                );
+            }
+        }
+        None => {
+            anyhow::bail!(
+                "no lockfile cache key found. Are you trying to pass a yarn v1 lockfile?"
+            );
+        }
     }
 
-    let lockfile =
-        yarn_lock_parser::parse_str(lockfile_contents).context("parsing yarn.lock file")?;
+    Ok(lockfile)
+}
 
-    Ok((cache_version, lockfile))
+pub trait LockfileExt {
+    /// Parses the cache_key of the lockfile, decomposing it into cache key version and optional compression field.
+    fn cache_key_parsed(&self) -> Option<(u8, Option<u32>)>;
+}
+
+impl LockfileExt for yarn_lock_parser::Lockfile<'_> {
+    fn cache_key_parsed(&self) -> Option<(u8, Option<u32>)> {
+        let cache_key = self.cache_key?;
+
+        Some(match cache_key.split_once('c') {
+            Some((left, right)) => (
+                left.parse()
+                    .expect("to parse cache_key before compression marker"),
+                Some(
+                    right
+                        .parse()
+                        .expect("to parse compression after compression marker"),
+                ),
+            ),
+            None => (
+                cache_key
+                    .parse()
+                    .expect("to parse cache_key without compression"),
+                None,
+            ),
+        })
+    }
 }
 
 pub trait EntryExt {
@@ -454,12 +460,19 @@ enum SourceWithIntegrity {
     Git { repo: String, commit: String },
 }
 
-struct Cache {
+struct Cache<'l> {
     out_dir: PathBuf,
-    key: CacheKey,
+    lockfile: Lockfile<'l>,
 }
 
-impl Cache {
+impl Cache<'_> {
+    fn cache_key_compression(&self) -> Option<u32> {
+        self.lockfile
+            .cache_key_parsed()
+            .expect("validated lockfile to have cache_key")
+            .1
+    }
+
     fn zip_name(&self, entry: &yarn_lock_parser::Entry, integrity: &str) -> String {
         let ident_hash = hex::encode(Sha512::digest(format!(
             "{}{}",
@@ -477,23 +490,18 @@ impl Cache {
             entry.slug(),
             &locator_hash[..10],
             if !entry.is_content_addressed() {
-                format!(
-                    "{}{}",
-                    self.key.version,
-                    self.key
-                        .compression
-                        .map(|c| format!("c{c}"))
-                        .unwrap_or_default()
-                )
+                self.lockfile
+                    .cache_key
+                    .expect("validated lockfile to have cache_key")
             } else {
-                integrity[..10].to_string()
+                &integrity[..10]
             },
         )
     }
 
     fn write_zip_and_check(
         &self,
-        entry: yarn_lock_parser::Entry,
+        entry: &yarn_lock_parser::Entry,
         integrity: &str,
         source: impl std::io::Read,
     ) -> Result<PathBuf, String> {
@@ -501,7 +509,7 @@ impl Cache {
             .out_dir
             .join("cache")
             .join(self.zip_name(&entry, integrity));
-        zip::write_yarn_zip(entry.name(), &dst, source, self.key.compression);
+        zip::write_yarn_zip(entry.name(), &dst, source, self.cache_key_compression());
 
         let out_hash = {
             let mut hasher = Sha512::new();
