@@ -1,7 +1,6 @@
 use anyhow::{Context, bail};
 use std::collections::HashMap;
 use std::io::{Seek, Write};
-use std::path::{Path, PathBuf};
 
 use crate::{Cache, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity};
 
@@ -140,7 +139,7 @@ impl Cache {
             .arg(&repo)
             .arg(&commit)
             .arg("--out")
-            .arg(PathBuf::from(&self.out_dir).join("checkouts").join(&commit))
+            .arg(&self.out_dir.join("checkouts").join(&commit))
             .output()
         {
             Ok(v) => v,
