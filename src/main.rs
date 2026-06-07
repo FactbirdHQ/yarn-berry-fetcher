@@ -364,14 +364,13 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     }
 
     fn npm_url(&self) -> String {
-        if let Some(mut bindings) = self.bindings() {
-            if let Some(archive_url) = bindings
+        if let Some(mut bindings) = self.bindings()
+            && let Some(archive_url) = bindings
                 .find(|(name, _)| name == "__archiveUrl")
                 .map(|(_, archive_url)| archive_url)
             {
                 return archive_url.into();
             }
-        }
 
         format!(
             "https://registry.npmjs.org/{}/-/{}-{}.tgz",
