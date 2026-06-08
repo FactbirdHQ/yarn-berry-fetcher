@@ -1,8 +1,8 @@
+use crate::EntryExt;
 use crate::fetch::fetch_to_tempfile;
-use crate::{EntryExt, SourceWithIntegrity, SourceWithoutIntegrity};
 
 use super::Cache;
-use anyhow::Context;
+use anyhow::{Context, bail};
 use futures::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
@@ -39,21 +39,9 @@ impl Cache<'_> {
             .iter()
             .filter(|x| x.is_real_source())
             .map(|entry| {
-                let source = match SourceWithIntegrity::try_from(entry) {
-                    Ok(source) => source,
-                    Err(SourceWithoutIntegrity::Tgz { url }) => {
-                        let Some(integrity) = missing_hashes.remove(entry.resolved) else {
-                            anyhow::bail!("{OUTDATED_MISSING_HASHES_ERR}");
-                        };
-                        assert_eq!(
-                            integrity.len(),
-                            128,
-                            "Invalid length for sha512 integrity in missing-hashes.json {}",
-                            entry.resolved
-                        );
-                        SourceWithIntegrity::Tgz { url, integrity }
-                    }
-                };
+                // For this entry, construct a [SourceWithIntegrity], while looking up from `missing_hashes`.
+                let source = entry_to_source(entry, &mut missing_hashes)?;
+
                 Ok((entry, source))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -138,4 +126,55 @@ impl Cache<'_> {
         }
         Ok(())
     }
+}
+
+fn entry_to_source(
+    entry: &yarn_lock_parser::Entry<'_>,
+    missing_lookup: &mut HashMap<String, String>,
+) -> anyhow::Result<SourceWithIntegrity> {
+    if (entry.is_npm() as u8 + entry.is_tar() as u8 + entry.is_git() as u8) > 1 {
+        bail!("Ambiguous source: {}", entry.resolved)
+    }
+    if entry.is_npm() || entry.is_tar() {
+        let integrity = if let Some(integrity) = entry.integrity_sha512() {
+            integrity.to_owned()
+        } else {
+            missing_lookup.remove(entry.resolved).ok_or_else(|| {
+                anyhow::anyhow!(OUTDATED_MISSING_HASHES_ERR).context(format!(
+                    "unable to find missing hash for {}",
+                    entry.resolved
+                ))
+            })?
+        };
+
+        let url = if entry.is_npm() {
+            entry.npm_url()
+        } else {
+            entry.resolution().to_owned()
+        };
+
+        if integrity.len() != 128 {
+            bail!(
+                "Invalid length for sha512 integrity in missing-hashes.json {}",
+                entry.resolved
+            );
+        }
+
+        Ok(SourceWithIntegrity::Tgz { url, integrity })
+    } else if entry.is_git() {
+        let commit = entry.git_commit().ok_or_else(|| {
+            anyhow::anyhow!("Git dependency without commit hash: {}", entry.resolved)
+        })?;
+        Ok(SourceWithIntegrity::Git {
+            repo: entry.protocol_and_source().unwrap().into(),
+            commit: commit.to_owned(),
+        })
+    } else {
+        bail!("Unsupported or unrecognized source: {}", entry.resolved);
+    }
+}
+
+enum SourceWithIntegrity {
+    Tgz { url: String, integrity: String },
+    Git { repo: String, commit: String },
 }

@@ -1,7 +1,4 @@
-use crate::{
-    EntryExt, Lockfile, LockfileExt, SourceWithIntegrity, SourceWithoutIntegrity,
-    fetch::fetch_to_tempfile, zip,
-};
+use crate::{EntryExt, Lockfile, LockfileExt, fetch::fetch_to_tempfile, zip};
 use anyhow::Context;
 use futures::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha512};
@@ -17,41 +14,43 @@ pub async fn get_missing_hashes(
         .cache_key_parsed()
         .expect("validated lockfile to have cache_key");
 
-    let missing = lockfile
-        .entries
-        .into_iter()
-        .filter(EntryExt::is_real_source)
-        .filter_map(|entry| {
-            SourceWithIntegrity::try_from(&entry)
-                .err()
-                .map(|err| (entry, err))
-        })
-        .collect::<Vec<_>>();
+    // find entries with missing hashes
+    futures::stream::iter(lockfile.entries.into_iter().filter(|entry| {
+        entry.is_real_source()
+            && (entry.is_npm() || entry.is_tar())
+            && entry.integrity_sha512().is_none()
+    }))
+    .map(|entry| async move {
+        let url = if entry.is_npm() {
+            entry.npm_url()
+        } else if entry.is_tar() {
+            entry.resolution().to_owned()
+        } else {
+            anyhow::bail!("Unsupported or unrecognized source: {}", entry.resolved);
+        };
 
-    futures::stream::iter(missing)
-        .map(|(entry, SourceWithoutIntegrity::Tgz { url })| async move {
-            let f = fetch_to_tempfile(http_client, &url).await?;
-            eprintln!("Success:  {url}");
+        let f = fetch_to_tempfile(http_client, &url).await?;
+        eprintln!("Success:  {url}");
 
-            let zip_dir = async_tempfile::TempDir::new()
-                .await
-                .context("creating tempdir")?;
+        let zip_dir = async_tempfile::TempDir::new()
+            .await
+            .context("creating tempdir")?;
 
-            // write_yarn_zip expects to be the first one opening the file,
-            // so we create a TempDir and pass it out.zip in that.
-            let zip_path = zip_dir.dir_path().join("out.zip");
+        // write_yarn_zip expects to be the first one opening the file,
+        // so we create a TempDir and pass it out.zip in that.
+        let zip_path = zip_dir.dir_path().join("out.zip");
 
-            let integrity = write_zip_and_calc_integrity(f, zip_path, compression, entry.name)
-                .await
-                .context("calculating integrity")?;
+        let integrity = write_zip_and_calc_integrity(f, zip_path, compression, entry.name)
+            .await
+            .context("calculating integrity")?;
 
-            zip_dir.drop_async().await;
+        zip_dir.drop_async().await;
 
-            Ok::<_, anyhow::Error>((entry.resolved.to_string(), integrity))
-        })
-        .buffer_unordered(fetch_concurrency)
-        .try_collect::<BTreeMap<_, _>>()
-        .await
+        Ok::<_, anyhow::Error>((entry.resolved.to_string(), integrity))
+    })
+    .buffer_unordered(fetch_concurrency)
+    .try_collect::<BTreeMap<_, _>>()
+    .await
 }
 
 /// Calculates the integrity digest, which is the sha512 sum of a specially crafted zipfile,
