@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
 
-use crate::{EntryExt, LockfileExt, missing_hashes::write_zip_and_calc_integrity};
+use crate::{EntryExt, LockfileExt};
 
 mod fetch;
 
@@ -54,28 +54,5 @@ impl Cache<'_> {
                 &integrity[..10]
             },
         )
-    }
-
-    async fn write_zip_and_check(
-        &self,
-        entry: &yarn_lock_parser::Entry<'_>,
-        integrity: &str,
-        reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    ) -> Result<(), String> {
-        let path = self
-            .out_dir
-            .join("cache")
-            .join(self.zip_name(entry, integrity));
-
-        let actual_integrity =
-            write_zip_and_calc_integrity(reader, path, self.cache_key_compression(), entry.name())
-                .await
-                .expect("writing zip and calculating integrity");
-
-        if integrity == actual_integrity {
-            Ok(())
-        } else {
-            Err(actual_integrity)
-        }
     }
 }

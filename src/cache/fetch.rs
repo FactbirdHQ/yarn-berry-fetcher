@@ -116,14 +116,29 @@ impl Cache<'_> {
     ) -> anyhow::Result<()> {
         let file = fetch_to_tempfile(client, &url).await?;
 
-        if let Err(out_hash) = self.write_zip_and_check(entry, &integrity, file).await {
+        let path = self
+            .out_dir
+            .join("cache")
+            .join(self.zip_name(entry, &integrity));
+
+        let actual_integrity = crate::missing_hashes::write_zip_and_calc_integrity(
+            file,
+            path,
+            self.cache_key_compression(),
+            entry.name(),
+        )
+        .await
+        .context("writing zip and calculating integrity")?;
+
+        if actual_integrity != integrity {
             eprintln!("Fail:     {url}");
             eprintln!("  expected: {integrity}");
-            eprintln!("  got:      {out_hash}");
+            eprintln!("  got:      {actual_integrity}");
             anyhow::bail!("got wrong hash");
         } else {
             eprintln!("Success:  {url}");
         }
+
         Ok(())
     }
 }
