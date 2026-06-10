@@ -24,29 +24,35 @@ static SAFE_TIME: LazyLock<DOSDateTime> = LazyLock::new(|| {
 const BATCH_SIZE: usize = 1024 * 1024 * 10; // 10 MiB
 const BIG_FILE_THRESHOLD: usize = 1024 * 1024 * 2; // 2 MiB
 
-fn add_ancestors(zip: &mut ZipArchive, included_directories: &mut HashSet<PathBuf>, dir: &Path) {
+fn add_ancestors(
+    zip: &mut ZipArchive,
+    included_directories: &mut HashSet<PathBuf>,
+    dir: &Path,
+) -> anyhow::Result<()> {
     if let Some(parent) = dir.parent() {
-        add_ancestors(zip, included_directories, parent);
+        add_ancestors(zip, included_directories, parent).context("recursing into add_ancestors")?;
     }
 
     if dir == Path::new("") {
-        return;
+        return Ok(());
     }
 
     if !included_directories.insert(dir.to_owned()) {
-        return;
+        return Ok(());
     }
 
     let mut dir = dir.to_owned().into_os_string().into_vec();
     dir.push(b'/');
 
     zip.add_dir_entry(
-        CString::new(dir).unwrap(),
+        CString::new(dir).context("constructing CString")?,
         Encoding::Guess,
         Some(0o755),
         Some((*SAFE_TIME).into()),
     )
-    .unwrap();
+    .context("adding dir_entry")?;
+
+    Ok(())
 }
 
 pub async fn write_yarn_zip_async<R>(
@@ -59,14 +65,14 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     let reader = tokio::task::spawn_blocking({
-        move || {
+        move || -> anyhow::Result<_> {
             let mut reader_sync = SyncIoBridge::new(reader);
-            write_yarn_zip(&package_name, path, &mut reader_sync, compression);
-            reader_sync.into_inner()
+            write_yarn_zip(&package_name, path, &mut reader_sync, compression)?;
+            Ok(reader_sync.into_inner())
         }
     })
     .await
-    .context("spawning write_yarn_zip task")?;
+    .context("spawning write_yarn_zip task")??;
 
     Ok(reader)
 }
@@ -79,13 +85,13 @@ fn write_yarn_zip(
     path: impl AsRef<Path>,
     reader: impl std::io::Read,
     compression: Option<u32>,
-) {
+) -> anyhow::Result<()> {
     let mut tar = tar::Archive::new(AnyDecoder::new(reader));
 
     let mut included_directories = HashSet::new();
 
     let mut first_open = true;
-    let mut entries_iter = tar.entries().unwrap();
+    let mut entries_iter = tar.entries().context("iterating over tar entries")?;
 
     // libzip may access the buffers we pass until the archive has been closed, but we need
     // to prevent keeping the entire archive contents in-memory.
@@ -99,9 +105,10 @@ fn write_yarn_zip(
             let src = Source::try_from(path.as_ref()).unwrap();
             if first_open {
                 first_open = false;
-                ZipArchive::open(src, [OpenFlag::Create, OpenFlag::Exclusive]).unwrap()
+                ZipArchive::open(src, [OpenFlag::Create, OpenFlag::Exclusive])
+                    .context("opening ZipArchive for the first time")?
             } else {
-                ZipArchive::open(src, []).unwrap()
+                ZipArchive::open(src, []).context("opening ZipArchive once again")?
             }
         };
 
@@ -109,13 +116,15 @@ fn write_yarn_zip(
 
         while bytes_added < BATCH_SIZE {
             let Some(entry) = entries_iter.next() else {
-                zip.close().unwrap();
+                zip.close()
+                    .map_err(|(_zip, err)| err)
+                    .context("closing zip")?;
                 break 'outer;
             };
 
-            let mut entry = entry.unwrap();
+            let mut entry = entry.context("getting entry")?;
 
-            let path = entry.path().unwrap();
+            let path = entry.path().context("reading entry path")?;
             let mut path_iter = path.components();
             path_iter.next();
             let path = path_iter.as_path();
@@ -123,11 +132,12 @@ fn write_yarn_zip(
             let path = PathBuf::from("node_modules/").join(package_name).join(path);
 
             let header = entry.header();
-            let mode = header.mode().unwrap();
+            let mode = header.mode().context("reading mode bits")?;
 
             // Insert all parent directories of the new path
             if let Some(parent) = path.parent() {
-                add_ancestors(&mut zip, &mut included_directories, parent);
+                add_ancestors(&mut zip, &mut included_directories, parent)
+                    .context("adding ancestors")?;
             }
 
             match header.entry_type() {
@@ -148,11 +158,13 @@ fn write_yarn_zip(
                         // The file is < BIG_FILE_THRESHOLD, read it into a buffer and add it in batch containing
                         // up to BATCH_SIZE of contents combined
                         let mut buf = vec![];
-                        bytes_added += entry.read_to_end(&mut buf).unwrap();
-                        let src = Source::try_from(buf.into_boxed_slice()).unwrap();
+                        bytes_added += entry.read_to_end(&mut buf).context("reading from entry")?;
+                        let src = Source::try_from(buf.into_boxed_slice())
+                            .context("converting buffer into axfive_libzip::Source")?;
                         (src, false)
                     };
-                    let path = CString::new(path.into_os_string().into_vec()).unwrap();
+                    let path = CString::new(path.into_os_string().into_vec())
+                        .context("constructing CString")?;
                     let add_result = zip.add(
                         path,
                         src,
@@ -173,36 +185,42 @@ fn write_yarn_zip(
                     if let Err(e) = add_result {
                         match &e.zip {
                             Some(ZipError::Exists) => {} // ignore
-                            _ => panic!("{}", e),
+                            _ => return Err(e).context("adding to zip"),
                         }
                     }
                     if must_flush {
-                        zip.close().unwrap();
+                        zip.close()
+                            .map_err(|(_zip, err)| err)
+                            .context("closing zip")?;
                         continue 'outer;
                     }
                 }
                 tar::EntryType::Directory => {
                     if !included_directories.insert(path.to_owned()) {
-                        return;
+                        break;
                     }
 
                     let path = path.to_owned().into_os_string().into_vec();
 
                     zip.add_dir_entry(
-                        CString::new(path).unwrap(),
+                        CString::new(path).context("constructing CString")?,
                         Encoding::Guess,
                         Some(0o755),
                         Some((*SAFE_TIME).into()),
                     )
-                    .unwrap();
+                    .context("adding dir_entry")?;
                 }
                 other => {
-                    panic!("Unsupported tar entry: {path:?} {other:?}")
+                    anyhow::bail!("Unsupported tar entry: {path:?} {other:?}")
                 }
             }
         }
 
         // At this point we have written enough data to the archive, so we start a new batch
-        zip.close().unwrap();
+        zip.close()
+            .map_err(|(_zip, err)| err)
+            .context("closing zip")?
     }
+
+    Ok(())
 }
