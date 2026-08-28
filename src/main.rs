@@ -1,193 +1,284 @@
+mod cache;
 mod fetch;
 mod missing_hashes;
 mod zip;
 
-use std::io::Write;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use serde::Deserialize;
-use sha2::{Digest, Sha512};
+use anyhow::Context;
+use clap::Parser;
+use tokio::io::AsyncWriteExt;
 use yarn_lock_parser::Lockfile;
 
-#[derive(Debug)]
-struct CacheKey {
-    version: usize,
-    compression: Option<u32>,
-}
+use crate::cache::Cache;
 
-static SUPPORTED_CACHE_VERSION: LazyLock<usize> = LazyLock::new(|| {
+const USER_AGENT: &str = "yarn-berry-fetcher/1";
+
+static SUPPORTED_CACHE_VERSION: LazyLock<u8> = LazyLock::new(|| {
     std::env!("YARN_ZIP_SUPPORTED_CACHE_VERSION")
         .parse()
         .unwrap()
 });
 
-fn fetch(lockfile_path: &str, missing_hashes_path: Option<&str>, out_dir: &Path) {
-    let lockfile_contents =
-        std::fs::read_to_string(lockfile_path).expect("unable to open lockfile");
-    let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
-    let yarnrc_path = Path::new(lockfile_path)
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(".yarnrc.yml");
-    let cache = Cache {
-        out_dir: out_dir.to_owned(),
-        key: cache_version,
-        is_global: false,
-        registry_tokens: fetch::load_registry_tokens(&yarnrc_path),
-    };
-    cache.fetch(lockfile, missing_hashes_path);
-    std::fs::write(out_dir.join("yarn.lock"), &lockfile_contents).unwrap();
-    if let Some(missing_hashes_path) = missing_hashes_path {
-        std::fs::copy(
-            missing_hashes_path,
-            PathBuf::from(&out_dir).join("missing-hashes.json"),
-        )
-        .unwrap();
-    }
+#[derive(clap::Parser)]
+struct Args {
+    /// Up to how many fetches to do concurrently.
+    #[clap(long, default_value_t = 20)]
+    fetch_concurrency: usize,
+
+    #[command(subcommand)]
+    command: Commands,
 }
 
-fn main() {
-    let mut args = std::env::args().skip(1);
+#[derive(PartialEq, Eq, clap::Subcommand)]
+enum Commands {
+    /// Download packages in the given yarn lock file to the $out directory.
+    Fetch {
+        #[clap(value_name = "yarn.lock")]
+        lockfile_path: PathBuf,
+        #[clap(value_name = "missing-hashes.json")]
+        missing_hashes_path: Option<PathBuf>,
+        /// The location to write packages to.
+        /// If unset, the literal directory "out" will be used.
+        #[clap(long, env = "out", default_value = "out")]
+        out_dir: PathBuf,
+    },
+    /// download packages in the given yarn.lock file, and print the appropriate 'nix-hash' for it.
+    Prefetch {
+        #[clap(value_name = "yarn.lock")]
+        lockfile_path: PathBuf,
+        #[clap(value_name = "missing-hashes.json")]
+        missing_hashes_path: Option<PathBuf>,
+    },
+    /// Produce missing hashes data, and print it to stdout.
+    MissingHashes {
+        #[clap(value_name = "yarn.lock")]
+        lockfile_path: PathBuf,
+    },
+    /// Convert an npm tgz file, write it to 'out.zip'.
+    Convert {
+        #[clap(value_name = "full package name")]
+        package_name: String,
 
-    match args.next().as_deref() {
-        Some("fetch") => {
-            let lockfile_path = args
-                .next()
-                .expect("yarn-berry-fetcher fetch <yarn.lock> [missing-hashes.json]");
-            let missing_hashes_path = args.next();
-            let out_dir = PathBuf::from(std::env::var("out").unwrap_or("out".into()));
-            fetch(&lockfile_path, missing_hashes_path.as_deref(), &out_dir)
-        }
-        Some("prefetch") => {
-            let lockfile_path = args
-                .next()
-                .expect("yarn-berry-fetcher prefetch <yarn.lock> [missing-hashes.json]");
-            let missing_hashes_path = args.next();
-            let tmp_dir = tempfile::TempDir::new().unwrap();
+        #[clap(value_name = "npm.tgz")]
+        tgz_filename: PathBuf,
+    },
+}
+
+async fn fetch(
+    lockfile_path: &Path,
+    missing_hashes_path: Option<impl AsRef<Path>>,
+    out_dir: &Path,
+    http_client: &reqwest::Client,
+    fetch_concurrency: usize,
+) -> anyhow::Result<()> {
+    let lockfile_contents = &tokio::fs::read_to_string(&lockfile_path)
+        .await
+        .context("reading lockfile contents")?;
+    let lockfile = parse_lockfile_ensure_version(lockfile_contents).context("parsing lockfile")?;
+
+    let missing_hashes: HashMap<String, String> = missing_hashes_path
+        .as_ref()
+        .map(|path| {
+            serde_json::from_slice(&std::fs::read(path).context("reading missing-hashes.json")?)
+                .context("parsing missing-hashes.json")
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let registry_tokens = load_registry_tokens(lockfile_path);
+
+    let cache = Cache::open(out_dir, lockfile);
+    cache
+        .fetch_all(
+            missing_hashes,
+            http_client,
+            &registry_tokens,
+            fetch_concurrency,
+        )
+        .await
+        .context("fetching all sources")?;
+
+    tokio::fs::write(out_dir.join("yarn.lock"), &lockfile_contents)
+        .await
+        .context("writing yarn.lock")?;
+    if let Some(missing_hashes_path) = missing_hashes_path {
+        std::fs::copy(missing_hashes_path, out_dir.join("missing-hashes.json"))
+            .context("writing missing-hashes.json")?;
+    }
+
+    Ok(())
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    let http_client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .context("building http client")?;
+
+    match args.command {
+        Commands::Fetch {
+            lockfile_path,
+            missing_hashes_path,
+            out_dir,
+        } => {
             fetch(
                 &lockfile_path,
-                missing_hashes_path.as_deref(),
+                missing_hashes_path,
+                &out_dir,
+                &http_client,
+                args.fetch_concurrency,
+            )
+            .await?;
+        }
+        Commands::Prefetch {
+            lockfile_path,
+            missing_hashes_path,
+        } => {
+            let tmp_dir = tempfile::TempDir::new().context("creating tempdir")?;
+            fetch(
+                &lockfile_path,
+                missing_hashes_path,
                 tmp_dir.path(),
-            );
+                &http_client,
+                args.fetch_concurrency,
+            )
+            .await?;
 
-            let output = match std::process::Command::new("nix-hash")
+            let output = async_process::Command::new("nix-hash")
                 .arg("--type")
                 .arg("sha256")
                 .arg("--sri")
                 .arg(tmp_dir.path())
                 .output()
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("Error spawning nix-hash: {e}");
-                    std::process::exit(1);
-                }
-            };
+                .await
+                .context("spawning nix-hash")?;
+
             if !output.status.success() {
                 eprintln!("nix-hash errored:");
-                std::io::stderr().write_all(&output.stderr).unwrap();
-                std::process::exit(1);
+                tokio::io::stderr().write_all(&output.stderr).await.unwrap();
+                anyhow::bail!("nix-hash errored")
             }
 
-            tmp_dir.close().unwrap();
+            tmp_dir.close().context("closing tempdir")?;
             println!("{}", String::from_utf8_lossy(&output.stdout));
         }
-        Some("missing-hashes") => {
-            let lockfile_path = args
-                .next()
-                .expect("yarn-berry-fetcher missing-hashes <yarn.lock>");
-            let lockfile_contents = std::fs::read_to_string(&lockfile_path).unwrap();
-            let (cache_version, lockfile) = parse_lockfile(&lockfile_contents);
-            let yarnrc_path = Path::new(&lockfile_path)
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(".yarnrc.yml");
-            let registry_tokens = fetch::load_registry_tokens(&yarnrc_path);
+        Commands::MissingHashes { lockfile_path } => {
+            let lockfile_contents = tokio::fs::read_to_string(&lockfile_path)
+                .await
+                .context("reading lockfile contents")?;
 
-            let missing_hashes =
-                missing_hashes::get_missing_hashes(lockfile, cache_version, &registry_tokens);
+            let lockfile = parse_lockfile_ensure_version(lockfile_contents.as_str())?;
 
-            println!("{}", serde_json::to_string_pretty(&missing_hashes).unwrap());
-        }
-        Some("convert") => {
-            let help = "yarn-berry-fetcher convert <full package name> <npm.tgz>";
-            let package_name = args.next().expect(help);
-            zip::write_yarn_zip(
-                &package_name,
-                "out.zip".into(),
-                std::fs::File::open(args.next().expect(help)).unwrap(),
-                None,
+            let registry_tokens = load_registry_tokens(&lockfile_path);
+
+            let missing_hashes = missing_hashes::get_missing_hashes(
+                lockfile,
+                &http_client,
+                &registry_tokens,
+                args.fetch_concurrency,
+            )
+            .await
+            .context("while getting missing hashes")?;
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&missing_hashes)
+                    .context("serializing missing_hashes")?
             );
+        }
+        Commands::Convert {
+            package_name,
+            tgz_filename,
+        } => {
+            zip::write_yarn_zip_async(
+                package_name,
+                "out.zip".into(),
+                tokio::fs::File::open(tgz_filename)
+                    .await
+                    .context("opening tgz_filename")?,
+                None,
+            )
+            .await?;
             eprintln!("wrote out.zip");
         }
-        _ => {
-            eprintln!(
-                r#"USAGE: yarn-berry-fetcher <fetch|prefetch|missing-hashes|convert> [options]
-
-fetch <yarn.lock> [missing-hashes.json]
-    download packages in the given yarn lock file to the the directory
-    specified by the "$out" environment variable. If "out" is unset,
-    the literal direcory "out" will be used.
-
-prefetch <yarn.lock> [missing-hashes.json]
-    download packages in the given yarn.lock file, and print the
-    appropriate 'nix-hash' for it.
-
-missing-hashes <yarn.lock>
-    Produce the missing-hashes data, and print it to stdout.
-    Other commands expect this as the 'missing-hashes.json'
-    argument.
-
-convert <full package name> <npm.tgz>
-    Convert an npm tgz file, write it to 'out.zip'."#
-            );
-            std::process::exit(1);
-        }
     }
+
+    Ok(())
 }
 
-fn parse_lockfile(lockfile_contents: &str) -> (CacheKey, Lockfile<'_>) {
-    let cache_version = {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct LockfileMetadata {
-            cache_key: String,
-        }
-        #[derive(Deserialize)]
-        struct Lockfile {
-            __metadata: LockfileMetadata,
-        }
+/// Reads the registry credentials from the `.yarnrc.yml` sitting next to the lockfile,
+/// which is where yarn itself looks for the project's configuration.
+fn load_registry_tokens(lockfile_path: &Path) -> HashMap<String, String> {
+    let yarnrc_path = lockfile_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".yarnrc.yml");
 
-        let lockfile: Lockfile = serde_yml::from_str(lockfile_contents)
-            .expect("yarn.lock is not valid YAML. Are you trying to pass a yarn v1 lockfile?");
-        let mut iter = lockfile.__metadata.cache_key.split('c');
-        let version_str = iter.next().unwrap();
-        let compression_str = iter.next();
-        CacheKey {
-            version: version_str.parse().unwrap(),
-            compression: compression_str.map(|c| c.parse().unwrap()),
-        }
-    };
+    fetch::load_registry_tokens(&yarnrc_path)
+}
 
-    eprintln!("{cache_version:?}");
+/// Parses the lockfile contents and ensures it's a supported version.
+fn parse_lockfile_ensure_version(lockfile_contents: &str) -> anyhow::Result<Lockfile<'_>> {
+    let lockfile =
+        yarn_lock_parser::parse_str(lockfile_contents).context("parsing yarn.lock file")?;
 
-    if cache_version.version != *SUPPORTED_CACHE_VERSION {
-        eprintln!(
-            r#"
+    match lockfile.cache_key_parsed() {
+        Some((cache_key_version, _compression)) => {
+            if cache_key_version != *SUPPORTED_CACHE_VERSION {
+                anyhow::bail!(
+                    r#"
 Error fetching berry dependencies.
 Found cache version {}
 Supported by this version of yarn-berry-fetcher: {}
 Hint: Are you using fetchYarnBerryDeps from the correct yarn-berry version?"#,
-            cache_version.version, *SUPPORTED_CACHE_VERSION
-        );
-
-        std::process::exit(1);
+                    lockfile.version,
+                    *SUPPORTED_CACHE_VERSION
+                );
+            }
+        }
+        None => {
+            anyhow::bail!(
+                "no lockfile cache key found. Are you trying to pass a yarn v1 lockfile?"
+            );
+        }
     }
 
-    let lockfile = yarn_lock_parser::parse_str(lockfile_contents).unwrap();
+    Ok(lockfile)
+}
 
-    (cache_version, lockfile)
+pub trait LockfileExt {
+    /// Parses the cache_key of the lockfile, decomposing it into cache key version and optional compression field.
+    fn cache_key_parsed(&self) -> Option<(u8, Option<u32>)>;
+}
+
+impl LockfileExt for yarn_lock_parser::Lockfile<'_> {
+    fn cache_key_parsed(&self) -> Option<(u8, Option<u32>)> {
+        let cache_key = self.cache_key?;
+
+        Some(match cache_key.split_once('c') {
+            Some((left, right)) => (
+                left.parse()
+                    .expect("to parse cache_key before compression marker"),
+                Some(
+                    right
+                        .parse()
+                        .expect("to parse compression after compression marker"),
+                ),
+            ),
+            None => (
+                cache_key
+                    .parse()
+                    .expect("to parse cache_key without compression"),
+                None,
+            ),
+        })
+    }
 }
 
 pub trait EntryExt {
@@ -297,13 +388,12 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
     }
 
     fn npm_url(&self) -> String {
-        if let Some(mut bindings) = self.bindings() {
-            if let Some(archive_url) = bindings
+        if let Some(mut bindings) = self.bindings()
+            && let Some(archive_url) = bindings
                 .find(|(name, _)| name == "__archiveUrl")
                 .map(|(_, archive_url)| archive_url)
-            {
-                return archive_url.into();
-            }
+        {
+            return archive_url.into();
         }
 
         format!(
@@ -361,125 +451,5 @@ impl EntryExt for yarn_lock_parser::Entry<'_> {
 
     fn is_content_addressed(&self) -> bool {
         !self.integrity.is_empty()
-    }
-}
-
-// Panics if we don't know how to fetch the source (even with added integrity data)
-impl TryFrom<&yarn_lock_parser::Entry<'_>> for SourceWithIntegrity {
-    type Error = SourceWithoutIntegrity;
-
-    fn try_from(
-        e: &yarn_lock_parser::Entry,
-    ) -> Result<SourceWithIntegrity, SourceWithoutIntegrity> {
-        assert!(
-            (e.is_npm() as u8 + e.is_tar() as u8 + e.is_git() as u8) < 2,
-            "Ambiguous source: {}",
-            e.resolved
-        );
-        if e.is_npm() {
-            match e.integrity_sha512() {
-                None => Err(SourceWithoutIntegrity::Tgz { url: e.npm_url() }),
-                Some(integrity) => Ok(SourceWithIntegrity::Tgz {
-                    url: e.npm_url(),
-                    integrity: integrity.into(),
-                }),
-            }
-        } else if e.is_tar() {
-            match e.integrity_sha512() {
-                None => Err(SourceWithoutIntegrity::Tgz {
-                    url: e.resolution().into(),
-                }),
-                Some(integrity) => Ok(SourceWithIntegrity::Tgz {
-                    url: e.resolution().into(),
-                    integrity: integrity.into(),
-                }),
-            }
-        } else if e.is_git() {
-            match e.git_commit() {
-                None => panic!("Git dependency without commit hash: {}", e.resolved),
-                Some(commit) => Ok(SourceWithIntegrity::Git {
-                    repo: e.protocol_and_source().unwrap().into(),
-                    commit: commit.into(),
-                }),
-            }
-        } else {
-            panic!("Unsupported or unrecognized source: {}", e.resolved);
-        }
-    }
-}
-
-#[derive(Debug)]
-enum SourceWithoutIntegrity {
-    Tgz { url: String },
-}
-
-enum SourceWithIntegrity {
-    Tgz { url: String, integrity: String },
-    Git { repo: String, commit: String },
-}
-
-struct Cache {
-    out_dir: PathBuf,
-    key: CacheKey,
-    is_global: bool,
-    registry_tokens: std::collections::HashMap<String, String>,
-}
-
-impl Cache {
-    fn zip_name(&self, entry: &yarn_lock_parser::Entry, integrity: &str) -> String {
-        let ident_hash = hex::encode(Sha512::digest(format!(
-            "{}{}",
-            entry.scope_name().unwrap_or_default(),
-            entry.name_rest(),
-        )));
-        let locator_hash = hex::encode(Sha512::digest(format!(
-            "{}{}",
-            ident_hash,
-            entry.resolution()
-        )));
-
-        format!(
-            "{}-{}-{}.zip",
-            entry.slug(),
-            &locator_hash[..10],
-            if self.is_global || !entry.is_content_addressed() {
-                format!(
-                    "{}{}",
-                    self.key.version,
-                    self.key
-                        .compression
-                        .map(|c| format!("c{c}"))
-                        .unwrap_or_default()
-                )
-            } else {
-                integrity[..10].to_string()
-            },
-        )
-    }
-
-    fn write_zip_and_check(
-        &self,
-        entry: yarn_lock_parser::Entry,
-        integrity: &str,
-        source: impl std::io::Read,
-    ) -> Result<PathBuf, String> {
-        let dst = self
-            .out_dir
-            .join("cache")
-            .join(self.zip_name(&entry, integrity));
-        zip::write_yarn_zip(entry.name(), dst.clone(), source, self.key.compression);
-
-        let out_hash = {
-            let mut hasher = Sha512::new();
-            let mut file = std::fs::File::open(&dst).unwrap();
-            std::io::copy(&mut file, &mut hasher).unwrap();
-            hex::encode(hasher.finalize())
-        };
-
-        if integrity == out_hash {
-            Ok(dst)
-        } else {
-            Err(out_hash)
-        }
     }
 }

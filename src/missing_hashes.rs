@@ -1,76 +1,85 @@
-use std::collections::{BTreeMap, HashMap};
-
-use crate::{
-    CacheKey, EntryExt, Lockfile, SourceWithIntegrity, SourceWithoutIntegrity,
-    fetch::fetch_to_tempfile, zip,
-};
-
-use rayon::prelude::*;
+use crate::{EntryExt, Lockfile, LockfileExt, fetch::fetch_to_tempfile, zip};
+use anyhow::Context;
+use futures::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha512};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
+use tokio_util::io::InspectReader;
 
-pub fn get_missing_hashes(
-    lockfile: Lockfile,
-    cache_key: CacheKey,
+pub async fn get_missing_hashes(
+    lockfile: Lockfile<'_>,
+    http_client: &reqwest::Client,
     registry_tokens: &HashMap<String, String>,
-) -> BTreeMap<String, String> {
-    let missing = lockfile
-        .entries
-        .into_iter()
-        .filter(EntryExt::is_real_source)
-        .filter_map(|entry| {
-            SourceWithIntegrity::try_from(&entry)
-                .err()
-                .map(|err| (entry, err))
-        })
-        .collect::<Vec<_>>();
+    fetch_concurrency: usize,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let (_cache_key, compression) = lockfile
+        .cache_key_parsed()
+        .expect("validated lockfile to have cache_key");
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(20)
-        .build_global()
-        .unwrap();
+    // find entries with missing hashes
+    futures::stream::iter(lockfile.entries.into_iter().filter(|entry| {
+        entry.is_real_source()
+            && (entry.is_npm() || entry.is_tar())
+            && entry.integrity_sha512().is_none()
+    }))
+    .map(|entry| async move {
+        let url = if entry.is_npm() {
+            entry.npm_url()
+        } else if entry.is_tar() {
+            entry.resolution().to_owned()
+        } else {
+            anyhow::bail!("Unsupported or unrecognized source: {}", entry.resolved);
+        };
 
-    let x = missing
-        .into_par_iter()
-        .panic_fuse()
-        .map_init(oxhttp::Client::new, |client, (entry, source)| {
-            let unwind_result = std::panic::catch_unwind(|| {
-                add_integrity(client, cache_key.compression, entry, source, registry_tokens)
-            });
-            match unwind_result {
-                Err(_) => std::process::exit(1),
-                Ok(v) => v,
-            }
-        })
-        .collect::<Vec<_>>();
+        let f = fetch_to_tempfile(http_client, &url, registry_tokens).await?;
+        eprintln!("Success:  {url}");
 
-    x.into_iter().collect::<BTreeMap<_, _>>()
+        let zip_dir = async_tempfile::TempDir::new()
+            .await
+            .context("creating tempdir")?;
+
+        // write_yarn_zip expects to be the first one opening the file,
+        // so we create a TempDir and pass it out.zip in that.
+        let zip_path = zip_dir.dir_path().join("out.zip");
+
+        let integrity = write_zip_and_calc_integrity(f, zip_path, compression, entry.name)
+            .await
+            .context("calculating integrity")?;
+
+        zip_dir.drop_async().await;
+
+        Ok::<_, anyhow::Error>((entry.resolved.to_string(), integrity))
+    })
+    .buffer_unordered(fetch_concurrency)
+    .try_collect::<BTreeMap<_, _>>()
+    .await
 }
 
-fn add_integrity(
-    client: &oxhttp::Client,
+/// Calculates the integrity digest, which is the sha512 sum of a specially crafted zipfile,
+/// lowerhex-encoded.
+/// This must be written to a named file as we call into C here, and that wants a path.
+pub async fn write_zip_and_calc_integrity(
+    reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    path: PathBuf,
     compression: Option<u32>,
-    entry: yarn_lock_parser::Entry,
-    source: SourceWithoutIntegrity,
-    registry_tokens: &HashMap<String, String>,
-) -> (String, String) {
-    let SourceWithoutIntegrity::Tgz { url } = source;
+    entry_name: &str,
+) -> anyhow::Result<String> {
+    zip::write_yarn_zip_async(entry_name.to_owned(), path.clone(), reader, compression).await?;
 
-    let f = fetch_to_tempfile(client, &url, registry_tokens);
-    eprintln!("Success:  {url}");
+    // hash the produced zip file
+    let zip_file = tokio::fs::File::open(&path)
+        .await
+        .context("opening written zipfile")?;
 
-    let tmp_dir = tempfile::TempDir::new().unwrap();
-    let dst = tmp_dir.path().join("out.zip");
+    let mut hasher = Sha512::new();
+    let mut r = InspectReader::new(zip_file, |d| {
+        hasher.update(d);
+    });
+    tokio::io::copy(&mut r, &mut tokio::io::sink())
+        .await
+        .context("reading the written zipfile")?;
 
-    zip::write_yarn_zip(entry.name(), dst.clone(), f, compression);
-
-    let out_hash = {
-        let mut hasher = Sha512::new();
-        let mut file = std::fs::File::open(&dst).unwrap();
-        std::io::copy(&mut file, &mut hasher).unwrap();
-        hex::encode(hasher.finalize())
-    };
-
-    tmp_dir.close().unwrap();
-
-    (entry.resolved.to_string(), out_hash)
+    Ok(hex::encode(hasher.finalize()))
 }

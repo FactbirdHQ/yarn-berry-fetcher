@@ -56,7 +56,20 @@
         ) { };
         yarn-berry-4-fetcher = yarn-berry-3-fetcher.override {
           libzip = pkgs.libzip.override {
-            zlib = pkgs.zlib-ng.override { withZlibCompat = true; };
+            zlib =
+              (pkgs.zlib-ng.overrideAttrs (old: {
+                patches = old.patches or [ ] ++ [
+                  # Yarn hashes the output of libzip(untar(tarball)), so the output of libzip
+                  # needs to be an exact match across versions, and this commit changes the
+                  # exact output. This is ridiculous, but such is life.
+                  (pkgs.fetchpatch {
+                    url = "https://github.com/zlib-ng/zlib-ng/commit/be819413be8a284b1827437006c0859644d0c367.patch";
+                    revert = true;
+                    hash = "sha256-rwRcNKpA2dMWkC6WRATDOCYCDDqqPvFJkQ6DLDohQd8=";
+                  })
+                ];
+              })).override
+                { withZlibCompat = true; };
           };
           YARN_ZIP_SUPPORTED_CACHE_VERSION = 10;
         };
