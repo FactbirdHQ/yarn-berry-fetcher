@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::path::Path;
-
 use anyhow::{self, Context};
 use tokio::io::AsyncSeekExt;
 use tokio_retry2::{
@@ -8,50 +5,16 @@ use tokio_retry2::{
     strategy::{ExponentialFactorBackoff, jitter},
 };
 
+use crate::yarnrc::RegistryTokens;
+
 const MAX_ATTEMPTS: usize = 5;
-
-/// Reads the `npmAuthToken` of every registry in the `.yarnrc.yml` at the given path,
-/// keyed by the registry it authenticates to.
-pub fn load_registry_tokens(yarnrc_path: &Path) -> HashMap<String, String> {
-    #[derive(serde::Deserialize, Default)]
-    struct NpmRegistry {
-        #[serde(rename = "npmAuthToken", default)]
-        npm_auth_token: Option<String>,
-    }
-    #[derive(serde::Deserialize, Default)]
-    struct YarnRc {
-        #[serde(rename = "npmRegistries", default)]
-        npm_registries: HashMap<String, NpmRegistry>,
-    }
-
-    let content = match std::fs::read_to_string(yarnrc_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
-        Err(e) => {
-            eprintln!("warning: failed to read {}: {e}", yarnrc_path.display());
-            return HashMap::new();
-        }
-    };
-    let yarnrc: YarnRc = match serde_yml::from_str(&content) {
-        Ok(y) => y,
-        Err(e) => {
-            eprintln!("warning: failed to parse {}: {e}", yarnrc_path.display());
-            return HashMap::new();
-        }
-    };
-    yarnrc
-        .npm_registries
-        .into_iter()
-        .filter_map(|(url, reg)| reg.npm_auth_token.map(|t| (url, t)))
-        .collect()
-}
 
 /// Fetches the given URL and writes contents to a temporary file. Exponential backoff.
 /// Requests to a registry that `registry_tokens` has a token for are authenticated with it.
 pub async fn fetch_to_tempfile(
     http_client: &reqwest::Client,
     url: &str,
-    registry_tokens: &HashMap<String, String>,
+    registry_tokens: &RegistryTokens,
 ) -> Result<async_tempfile::TempFile, anyhow::Error> {
     let i = std::sync::atomic::AtomicUsize::new(0);
 
@@ -68,10 +31,7 @@ pub async fn fetch_to_tempfile(
             .map_err(RetryError::Permanent)?;
 
         let mut request = http_client.get(url);
-        if let Some((_, token)) = registry_tokens
-            .iter()
-            .find(|(registry, _)| url.starts_with(registry.as_str()))
-        {
+        if let Some(token) = registry_tokens.for_url(url) {
             request = request.bearer_auth(token);
         }
 

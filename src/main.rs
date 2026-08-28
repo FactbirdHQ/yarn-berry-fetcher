@@ -1,6 +1,7 @@
 mod cache;
 mod fetch;
 mod missing_hashes;
+mod yarnrc;
 mod zip;
 
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use yarn_lock_parser::Lockfile;
 
 use crate::cache::Cache;
+use crate::yarnrc::RegistryTokens;
 
 const USER_AGENT: &str = "yarn-berry-fetcher/1";
 
@@ -88,7 +90,7 @@ async fn fetch(
         .transpose()?
         .unwrap_or_default();
 
-    let registry_tokens = load_registry_tokens(lockfile_path);
+    let registry_tokens = load_registry_tokens(lockfile_path)?;
 
     let cache = Cache::open(out_dir, lockfile);
     cache
@@ -175,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
 
             let lockfile = parse_lockfile_ensure_version(lockfile_contents.as_str())?;
 
-            let registry_tokens = load_registry_tokens(&lockfile_path);
+            let registry_tokens = load_registry_tokens(&lockfile_path)?;
 
             let missing_hashes = missing_hashes::get_missing_hashes(
                 lockfile,
@@ -214,13 +216,13 @@ async fn main() -> anyhow::Result<()> {
 
 /// Reads the registry credentials from the `.yarnrc.yml` sitting next to the lockfile,
 /// which is where yarn itself looks for the project's configuration.
-fn load_registry_tokens(lockfile_path: &Path) -> HashMap<String, String> {
+fn load_registry_tokens(lockfile_path: &Path) -> anyhow::Result<RegistryTokens> {
     let yarnrc_path = lockfile_path
         .parent()
         .unwrap_or(Path::new("."))
         .join(".yarnrc.yml");
 
-    fetch::load_registry_tokens(&yarnrc_path)
+    RegistryTokens::load(&yarnrc_path).context("loading registry tokens")
 }
 
 /// Parses the lockfile contents and ensures it's a supported version.
