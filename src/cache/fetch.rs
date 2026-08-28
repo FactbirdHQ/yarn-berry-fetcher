@@ -1,5 +1,6 @@
 use crate::EntryExt;
 use crate::fetch::fetch_to_tempfile;
+use crate::yarnrc::RegistryTokens;
 
 use super::Cache;
 use anyhow::{Context, bail};
@@ -31,7 +32,7 @@ impl Cache<'_> {
         &self,
         mut missing_hashes: HashMap<String, String>,
         http_client: &reqwest::Client,
-        registry_tokens: &HashMap<String, String>,
+        registry_tokens: &RegistryTokens,
         fetch_concurrency: usize,
     ) -> anyhow::Result<()> {
         let sources = self
@@ -70,7 +71,7 @@ impl Cache<'_> {
     async fn fetch_source(
         &self,
         client: &reqwest::Client,
-        registry_tokens: &HashMap<String, String>,
+        registry_tokens: &RegistryTokens,
         entry: &yarn_lock_parser::Entry<'_>,
         source: SourceWithIntegrity,
     ) -> anyhow::Result<()> {
@@ -113,7 +114,7 @@ impl Cache<'_> {
     async fn fetch_tgz_and_write_zip(
         &self,
         client: &reqwest::Client,
-        registry_tokens: &HashMap<String, String>,
+        registry_tokens: &RegistryTokens,
         entry: &yarn_lock_parser::Entry<'_>,
         url: String,
         integrity: String,
