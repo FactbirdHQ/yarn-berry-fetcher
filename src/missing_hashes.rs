@@ -1,17 +1,16 @@
-use crate::{EntryExt, Lockfile, LockfileExt, fetch::fetch_to_tempfile, zip};
+use crate::{
+    EntryExt, Lockfile, LockfileExt, fetch::fetch_to_tempfile, yarnrc::RegistryTokens, zip,
+};
 use anyhow::Context;
 use futures::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha512};
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, path::PathBuf};
 use tokio_util::io::InspectReader;
 
 pub async fn get_missing_hashes(
     lockfile: Lockfile<'_>,
     http_client: &reqwest::Client,
-    registry_tokens: &HashMap<String, String>,
+    registry_tokens: &RegistryTokens,
     fetch_concurrency: usize,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let (_cache_key, compression) = lockfile
