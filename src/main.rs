@@ -1,5 +1,6 @@
 mod cache;
 mod fetch;
+mod git_checkouts;
 mod missing_hashes;
 mod yarnrc;
 mod zip;
@@ -14,6 +15,7 @@ use tokio::io::AsyncWriteExt;
 use yarn_lock_parser::Lockfile;
 
 use crate::cache::Cache;
+use crate::git_checkouts::GitCheckouts;
 use crate::yarnrc::RegistryTokens;
 
 const USER_AGENT: &str = "yarn-berry-fetcher/1";
@@ -29,6 +31,18 @@ struct Args {
     /// Up to how many fetches to do concurrently.
     #[clap(long, default_value_t = 20)]
     fetch_concurrency: usize,
+
+    /// A git dependency's commit and a directory already holding its checkout,
+    /// as `<commit>=<path>`. That commit is copied from the directory instead of
+    /// being cloned with nix-prefetch-git. The variable takes space-separated
+    /// entries.
+    #[clap(
+        long = "git-checkout",
+        value_name = "COMMIT=PATH",
+        env = "YARN_BERRY_FETCHER_GIT_CHECKOUTS",
+        value_delimiter = ' '
+    )]
+    git_checkouts: Vec<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -75,6 +89,7 @@ async fn fetch(
     out_dir: &Path,
     http_client: &reqwest::Client,
     fetch_concurrency: usize,
+    git_checkouts: &GitCheckouts,
 ) -> anyhow::Result<()> {
     let lockfile_contents = &tokio::fs::read_to_string(&lockfile_path)
         .await
@@ -92,7 +107,7 @@ async fn fetch(
 
     let registry_tokens = load_registry_tokens(lockfile_path)?;
 
-    let cache = Cache::open(out_dir, lockfile);
+    let cache = Cache::open(out_dir, lockfile, git_checkouts);
     cache
         .fetch_all(
             missing_hashes,
@@ -117,6 +132,8 @@ async fn fetch(
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let git_checkouts = git_checkouts::parse(args.git_checkouts.iter().map(String::as_str))
+        .context("parsing --git-checkout")?;
 
     let http_client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -135,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
                 &out_dir,
                 &http_client,
                 args.fetch_concurrency,
+                &git_checkouts,
             )
             .await?;
         }
@@ -149,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
                 tmp_dir.path(),
                 &http_client,
                 args.fetch_concurrency,
+                &git_checkouts,
             )
             .await?;
 
