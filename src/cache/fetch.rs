@@ -5,7 +5,7 @@ use crate::yarnrc::RegistryTokens;
 use super::Cache;
 use anyhow::{Context, bail};
 use futures::{StreamExt, TryStreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::io::AsyncWriteExt;
 
 const NIX_PREFETCH_GIT_ERR: &str = r#"
@@ -35,7 +35,7 @@ impl Cache<'_> {
         registry_tokens: &RegistryTokens,
         fetch_concurrency: usize,
     ) -> anyhow::Result<()> {
-        let sources = self
+        let mut sources = self
             .lockfile
             .entries
             .iter()
@@ -51,6 +51,14 @@ impl Cache<'_> {
         if !missing_hashes.is_empty() {
             anyhow::bail!("{OUTDATED_MISSING_HASHES_ERR}");
         }
+
+        // Entries resolving to one commit, such as two workspaces of a git monorepo,
+        // share `checkouts/<commit>`, so it is fetched once.
+        let mut commits = HashSet::new();
+        sources.retain(|(_, source)| match source {
+            SourceWithIntegrity::Git { commit, .. } => commits.insert(commit.clone()),
+            SourceWithIntegrity::Tgz { .. } => true,
+        });
 
         tokio::fs::create_dir_all(self.out_dir.join("cache"))
             .await

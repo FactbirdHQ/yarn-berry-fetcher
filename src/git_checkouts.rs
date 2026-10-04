@@ -6,7 +6,10 @@
 //!
 //! A checkout is the commit's tree without `.git`, which is what
 //! `nix-prefetch-git --builder` writes, so the cache hashes the same whichever
-//! way it was fetched.
+//! way it was fetched. The exception is a repository whose `.gitattributes`
+//! converts files on checkout with `eol`, `text` or `ident`. The git CLI behind
+//! `nix-prefetch-git` applies those and `builtins.fetchGit` doesn't, so such a
+//! checkout fails the fixed-output hash.
 
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -25,7 +28,10 @@ fn find(dir: &Path, commit: &str) -> anyhow::Result<Option<PathBuf>> {
 
     let entry = dir.join(commit);
     match std::fs::canonicalize(&entry) {
-        Ok(checkout) => Ok(Some(checkout)),
+        Ok(checkout) => {
+            anyhow::ensure!(checkout.is_dir(), "{} is not a directory", entry.display());
+            Ok(Some(checkout))
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err).with_context(|| format!("resolving {}", entry.display())),
     }
@@ -92,6 +98,21 @@ mod tests {
             Some(checkout.canonicalize().unwrap())
         );
         assert_eq!(find(&dir, "def456").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_a_checkout_that_is_not_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("checkouts");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(tmp.path().join("file"), "").unwrap();
+        symlink(tmp.path().join("file"), dir.join("abc123")).unwrap();
+
+        let err = find(&dir, "abc123").unwrap_err();
+        assert!(
+            err.to_string().ends_with("abc123 is not a directory"),
+            "{err}"
+        );
     }
 
     #[test]
