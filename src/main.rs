@@ -33,7 +33,12 @@ struct Args {
 
     /// A directory of already-fetched git dependencies as `<dir>/<commit>`, such as a
     /// `linkFarm` of `builtins.fetchGit` results, copied instead of cloned.
-    #[clap(long, value_name = "DIR", env = "YARN_BERRY_FETCHER_GIT_CHECKOUTS")]
+    #[clap(
+        long,
+        global = true,
+        value_name = "DIR",
+        env = "YARN_BERRY_FETCHER_GIT_CHECKOUTS"
+    )]
     git_checkouts: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -83,6 +88,14 @@ async fn fetch(
     fetch_concurrency: usize,
     git_checkouts: Option<&Path>,
 ) -> anyhow::Result<()> {
+    if let Some(dir) = git_checkouts {
+        anyhow::ensure!(
+            dir.is_dir(),
+            "--git-checkouts {} is not a directory",
+            dir.display()
+        );
+    }
+
     let lockfile_contents = &tokio::fs::read_to_string(&lockfile_path)
         .await
         .context("reading lockfile contents")?;
@@ -124,13 +137,6 @@ async fn fetch(
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(dir) = &args.git_checkouts {
-        anyhow::ensure!(
-            dir.is_dir(),
-            "--git-checkouts {} is not a directory",
-            dir.display()
-        );
-    }
 
     let http_client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
