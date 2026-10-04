@@ -87,18 +87,25 @@ impl Cache<'_> {
 
     async fn fetch_git(&self, repo: String, commit: String) -> anyhow::Result<()> {
         let dest = self.out_dir.join("checkouts").join(&commit);
-        if let Some(src) = self.git_checkouts.get(&commit) {
-            let src = src.clone();
-            tokio::task::spawn_blocking(move || {
+        if let Some(dir) = self.git_checkouts {
+            let copy = (dir.to_owned(), commit.clone(), dest.clone());
+            let copied = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+                let (dir, commit, dest) = copy;
+                let Some(src) = crate::git_checkouts::find(&dir, &commit)? else {
+                    return Ok(false);
+                };
                 std::fs::create_dir_all(dest.parent().expect("checkouts/<commit> has a parent"))
                     .context("creating checkouts directory")?;
-                crate::git_checkouts::copy_tree(&src, &dest)
+                crate::git_checkouts::copy_tree(&src, &dest)?;
+                Ok(true)
             })
             .await
             .context("joining the checkout copy")?
             .with_context(|| format!("copying the checkout of {repo}#commit={commit}"))?;
-            eprintln!("Success:  git+{repo}#commit={commit} (from --git-checkout)");
-            return Ok(());
+            if copied {
+                eprintln!("Success:  git+{repo}#commit={commit} (from --git-checkouts)");
+                return Ok(());
+            }
         }
 
         let output = async_process::Command::new("nix-prefetch-git")

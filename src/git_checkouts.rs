@@ -3,39 +3,32 @@
 //! A git dependency is otherwise cloned with `nix-prefetch-git`, which runs with
 //! an empty `HOME` and no system gitconfig, so inside a fixed-output derivation
 //! it has no credential and no URL rewrite to reach a private repository with.
-//! A caller that can fetch the commit some other way, such as `builtins.fetchGit`
-//! while Nix evaluates, passes the tree in here and the clone is skipped.
 //!
-//! The tree is the commit's checkout without `.git`, which is what
+//! A checkout is the commit's tree without `.git`, which is what
 //! `nix-prefetch-git --builder` writes, so the cache hashes the same whichever
 //! way it was fetched.
 
-use std::collections::HashMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-/// Commit to the directory holding its checkout.
-pub type GitCheckouts = HashMap<String, PathBuf>;
+/// Returns the checkout of `commit` in `dir`, or `None` when `dir` doesn't hold
+/// that commit. The path is resolved through symlinks, since a fixed-output
+/// derivation's output can't reference another store path and has to hold the
+/// tree itself. Only a hexadecimal commit is looked up, so a lockfile can't name
+/// a path outside `dir`.
+pub fn find(dir: &Path, commit: &str) -> anyhow::Result<Option<PathBuf>> {
+    if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
 
-/// Parses `<commit>=<path>` entries. Empty entries are skipped, so an empty or
-/// whitespace-only environment variable means no checkouts.
-pub fn parse<'a>(entries: impl IntoIterator<Item = &'a str>) -> anyhow::Result<GitCheckouts> {
-    entries
-        .into_iter()
-        .flat_map(str::split_whitespace)
-        .map(|entry| {
-            let (commit, path) = entry
-                .split_once('=')
-                .with_context(|| format!("git checkout {entry:?} is not <commit>=<path>"))?;
-            anyhow::ensure!(
-                !commit.is_empty() && !path.is_empty(),
-                "git checkout {entry:?} is not <commit>=<path>"
-            );
-            Ok((commit.to_owned(), PathBuf::from(path)))
-        })
-        .collect()
+    let entry = dir.join(commit);
+    match std::fs::canonicalize(&entry) {
+        Ok(checkout) => Ok(Some(checkout)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("resolving {}", entry.display())),
+    }
 }
 
 /// Copies `src` to `dest`, keeping symlinks as symlinks and file modes as they
@@ -74,19 +67,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_pairs_and_skips_empty_entries() {
-        let checkouts = parse(["", "  abc=/nix/store/x-source  def=/nix/store/y-source "]).unwrap();
-        assert_eq!(checkouts.len(), 2);
-        assert_eq!(checkouts["abc"], PathBuf::from("/nix/store/x-source"));
-        assert_eq!(checkouts["def"], PathBuf::from("/nix/store/y-source"));
-        assert!(parse([""]).unwrap().is_empty());
+    fn finds_a_linked_checkout_by_its_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("source");
+        std::fs::create_dir(&checkout).unwrap();
+        let dir = tmp.path().join("checkouts");
+        std::fs::create_dir(&dir).unwrap();
+        symlink(&checkout, dir.join("abc123")).unwrap();
+
+        assert_eq!(
+            find(&dir, "abc123").unwrap(),
+            Some(checkout.canonicalize().unwrap())
+        );
+        assert_eq!(find(&dir, "def456").unwrap(), None);
     }
 
     #[test]
-    fn rejects_entries_without_a_commit_or_path() {
-        assert!(parse(["abc"]).is_err());
-        assert!(parse(["=/nix/store/x"]).is_err());
-        assert!(parse(["abc="]).is_err());
+    fn looks_up_only_hexadecimal_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("checkouts")).unwrap();
+
+        assert_eq!(
+            find(&tmp.path().join("checkouts"), "../checkouts").unwrap(),
+            None
+        );
+        assert_eq!(find(&tmp.path().join("checkouts"), "").unwrap(), None);
     }
 
     #[test]
