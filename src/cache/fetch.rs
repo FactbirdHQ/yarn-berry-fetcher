@@ -52,8 +52,7 @@ impl Cache<'_> {
             anyhow::bail!("{OUTDATED_MISSING_HASHES_ERR}");
         }
 
-        // Entries resolving to one commit, such as two workspaces of a git monorepo,
-        // share `checkouts/<commit>`, so it is fetched once.
+        // Entries sharing a commit, such as a monorepo's workspaces, share its checkout.
         let mut commits = HashSet::new();
         sources.retain(|(_, source)| match source {
             SourceWithIntegrity::Git { commit, .. } => commits.insert(commit.clone()),

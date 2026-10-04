@@ -31,9 +31,8 @@ struct Args {
     #[clap(long, default_value_t = 20)]
     fetch_concurrency: usize,
 
-    /// A directory holding already-fetched git dependencies as `<dir>/<commit>`,
-    /// such as a `linkFarm` of `builtins.fetchGit` results. A commit found there is
-    /// copied instead of being cloned with nix-prefetch-git.
+    /// A directory of already-fetched git dependencies as `<dir>/<commit>`, such as a
+    /// `linkFarm` of `builtins.fetchGit` results, copied instead of cloned.
     #[clap(long, value_name = "DIR", env = "YARN_BERRY_FETCHER_GIT_CHECKOUTS")]
     git_checkouts: Option<PathBuf>,
 

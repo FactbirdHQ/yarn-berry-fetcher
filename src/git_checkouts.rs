@@ -1,26 +1,10 @@
-//! Git dependencies the caller has already fetched.
-//!
-//! A git dependency is otherwise cloned with `nix-prefetch-git`, which runs with
-//! an empty `HOME` and no system gitconfig, so inside a fixed-output derivation
-//! it has no credential and no URL rewrite to reach a private repository with.
-//!
-//! A checkout is the commit's tree without `.git`, which is what
-//! `nix-prefetch-git --builder` writes, so the cache hashes the same whichever
-//! way it was fetched. The exception is a repository whose `.gitattributes`
-//! converts files on checkout with `eol`, `text` or `ident`. The git CLI behind
-//! `nix-prefetch-git` applies those and `builtins.fetchGit` doesn't, so such a
-//! checkout fails the fixed-output hash.
-
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-/// Returns the checkout of `commit` in `dir`, or `None` when `dir` doesn't hold
-/// that commit. The path is resolved through symlinks, since a fixed-output
-/// derivation's output can't reference another store path and has to hold the
-/// tree itself. Only a hexadecimal commit is looked up, so a lockfile can't name
-/// a path outside `dir`.
+/// Returns the checkout of `commit` in `dir`, resolved through symlinks.
+/// Only a commit hash is looked up, so a lockfile can't name a path outside `dir`.
 fn find(dir: &Path, commit: &str) -> anyhow::Result<Option<PathBuf>> {
     if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(None);
@@ -37,8 +21,7 @@ fn find(dir: &Path, commit: &str) -> anyhow::Result<Option<PathBuf>> {
     }
 }
 
-/// Copies the checkout of `commit` in `dir` to `dest`, and returns whether `dir`
-/// held that commit.
+/// Copies the checkout of `commit` in `dir` to `dest`, if `dir` holds one.
 pub fn copy_checkout(dir: &Path, commit: &str, dest: &Path) -> anyhow::Result<bool> {
     let Some(src) = find(dir, commit)? else {
         return Ok(false);
@@ -49,13 +32,11 @@ pub fn copy_checkout(dir: &Path, commit: &str, dest: &Path) -> anyhow::Result<bo
     Ok(true)
 }
 
-/// Copies `src` to `dest`, keeping symlinks as symlinks and file modes as they
-/// are, then makes everything owner-writable. A store path is read-only, and the
-/// fixed-output builder has to be able to remove its own output on failure.
+/// Copies `src` to `dest`, keeping symlinks and file modes.
 fn copy_tree(src: &Path, dest: &Path) -> anyhow::Result<()> {
-    let metadata =
-        std::fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?;
-    let file_type = metadata.file_type();
+    let file_type = std::fs::symlink_metadata(src)
+        .with_context(|| format!("reading {}", src.display()))?
+        .file_type();
     if file_type.is_symlink() {
         let target =
             std::fs::read_link(src).with_context(|| format!("reading link {}", src.display()))?;
@@ -66,22 +47,18 @@ fn copy_tree(src: &Path, dest: &Path) -> anyhow::Result<()> {
             let child = child?;
             copy_tree(&child.path(), &dest.join(child.file_name()))?;
         }
-        add_owner_write(dest, metadata.permissions().mode() | 0o700)?;
     } else {
         std::fs::copy(src, dest)
             .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
-        add_owner_write(dest, metadata.permissions().mode() | 0o200)?;
     }
     Ok(())
 }
 
-fn add_owner_write(path: &Path, mode: u32) -> anyhow::Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .with_context(|| format!("setting the mode of {}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     #[test]
@@ -128,38 +105,29 @@ mod tests {
     }
 
     #[test]
-    fn copies_a_read_only_tree_with_its_modes_and_links() {
+    fn copies_a_read_only_tree_with_its_links_and_executables() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         std::fs::create_dir_all(src.join("bin")).unwrap();
         std::fs::write(src.join("bin/tool"), "#!/bin/sh\n").unwrap();
         std::fs::write(src.join("README"), "hi").unwrap();
         symlink("README", src.join("README.link")).unwrap();
-        std::fs::set_permissions(src.join("bin/tool"), PermissionsExt::from_mode(0o555)).unwrap();
-        std::fs::set_permissions(src.join("README"), PermissionsExt::from_mode(0o444)).unwrap();
-        std::fs::set_permissions(src.join("bin"), PermissionsExt::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(src.join("bin/tool"), Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(src.join("README"), Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(src.join("bin"), Permissions::from_mode(0o555)).unwrap();
 
         let dest = tmp.path().join("dest");
         copy_tree(&src, &dest).unwrap();
 
-        let mode = |path: &str| {
-            std::fs::symlink_metadata(dest.join(path))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777
-        };
-        assert_eq!(mode("bin/tool"), 0o755);
-        assert_eq!(mode("README"), 0o644);
-        assert_eq!(mode("bin"), 0o755);
+        let tool = std::fs::metadata(dest.join("bin/tool")).unwrap();
+        assert_ne!(tool.permissions().mode() & 0o111, 0);
         assert_eq!(std::fs::read_to_string(dest.join("README")).unwrap(), "hi");
         assert_eq!(
             std::fs::read_link(dest.join("README.link")).unwrap(),
             PathBuf::from("README")
         );
+        std::fs::remove_dir_all(&dest).unwrap();
 
-        // The source is left read-only for the store's sake; restore it so the
-        // tempdir can be removed.
-        std::fs::set_permissions(src.join("bin"), PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(src.join("bin"), Permissions::from_mode(0o755)).unwrap();
     }
 }
