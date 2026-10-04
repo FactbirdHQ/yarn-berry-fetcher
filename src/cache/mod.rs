@@ -1,9 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha512};
 use yarn_lock_parser::Lockfile;
 
-use crate::git_checkouts::GitCheckouts;
 use crate::{EntryExt, LockfileExt};
 
 mod fetch;
@@ -11,14 +10,14 @@ mod fetch;
 pub struct Cache<'l> {
     out_dir: PathBuf,
     lockfile: Lockfile<'l>,
-    git_checkouts: &'l GitCheckouts,
+    git_checkouts: Option<&'l Path>,
 }
 
 impl<'l> Cache<'l> {
     pub fn open(
         out_dir: impl Into<PathBuf>,
         lockfile: Lockfile<'l>,
-        git_checkouts: &'l GitCheckouts,
+        git_checkouts: Option<&'l Path>,
     ) -> Self {
         Self {
             out_dir: out_dir.into(),

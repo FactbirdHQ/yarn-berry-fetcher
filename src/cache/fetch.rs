@@ -5,7 +5,7 @@ use crate::yarnrc::RegistryTokens;
 use super::Cache;
 use anyhow::{Context, bail};
 use futures::{StreamExt, TryStreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::io::AsyncWriteExt;
 
 const NIX_PREFETCH_GIT_ERR: &str = r#"
@@ -35,7 +35,7 @@ impl Cache<'_> {
         registry_tokens: &RegistryTokens,
         fetch_concurrency: usize,
     ) -> anyhow::Result<()> {
-        let sources = self
+        let mut sources = self
             .lockfile
             .entries
             .iter()
@@ -51,6 +51,14 @@ impl Cache<'_> {
         if !missing_hashes.is_empty() {
             anyhow::bail!("{OUTDATED_MISSING_HASHES_ERR}");
         }
+
+        // Entries resolving to one commit, such as two workspaces of a git monorepo,
+        // share `checkouts/<commit>`, so it is fetched once.
+        let mut commits = HashSet::new();
+        sources.retain(|(_, source)| match source {
+            SourceWithIntegrity::Git { commit, .. } => commits.insert(commit.clone()),
+            SourceWithIntegrity::Tgz { .. } => true,
+        });
 
         tokio::fs::create_dir_all(self.out_dir.join("cache"))
             .await
@@ -87,18 +95,18 @@ impl Cache<'_> {
 
     async fn fetch_git(&self, repo: String, commit: String) -> anyhow::Result<()> {
         let dest = self.out_dir.join("checkouts").join(&commit);
-        if let Some(src) = self.git_checkouts.get(&commit) {
-            let src = src.clone();
-            tokio::task::spawn_blocking(move || {
-                std::fs::create_dir_all(dest.parent().expect("checkouts/<commit> has a parent"))
-                    .context("creating checkouts directory")?;
-                crate::git_checkouts::copy_tree(&src, &dest)
+        if let Some(dir) = self.git_checkouts {
+            let copied = tokio::task::spawn_blocking({
+                let (dir, commit, dest) = (dir.to_owned(), commit.clone(), dest.clone());
+                move || crate::git_checkouts::copy_checkout(&dir, &commit, &dest)
             })
             .await
             .context("joining the checkout copy")?
             .with_context(|| format!("copying the checkout of {repo}#commit={commit}"))?;
-            eprintln!("Success:  git+{repo}#commit={commit} (from --git-checkout)");
-            return Ok(());
+            if copied {
+                eprintln!("Success:  git+{repo}#commit={commit} (from --git-checkouts)");
+                return Ok(());
+            }
         }
 
         let output = async_process::Command::new("nix-prefetch-git")
