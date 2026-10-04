@@ -18,7 +18,7 @@ use anyhow::Context;
 /// derivation's output can't reference another store path and has to hold the
 /// tree itself. Only a hexadecimal commit is looked up, so a lockfile can't name
 /// a path outside `dir`.
-pub fn find(dir: &Path, commit: &str) -> anyhow::Result<Option<PathBuf>> {
+fn find(dir: &Path, commit: &str) -> anyhow::Result<Option<PathBuf>> {
     if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(None);
     }
@@ -31,10 +31,22 @@ pub fn find(dir: &Path, commit: &str) -> anyhow::Result<Option<PathBuf>> {
     }
 }
 
+/// Copies the checkout of `commit` in `dir` to `dest`, and returns whether `dir`
+/// held that commit.
+pub fn copy_checkout(dir: &Path, commit: &str, dest: &Path) -> anyhow::Result<bool> {
+    let Some(src) = find(dir, commit)? else {
+        return Ok(false);
+    };
+    std::fs::create_dir_all(dest.parent().expect("checkouts/<commit> has a parent"))
+        .context("creating checkouts directory")?;
+    copy_tree(&src, dest)?;
+    Ok(true)
+}
+
 /// Copies `src` to `dest`, keeping symlinks as symlinks and file modes as they
 /// are, then makes everything owner-writable. A store path is read-only, and the
 /// fixed-output builder has to be able to remove its own output on failure.
-pub fn copy_tree(src: &Path, dest: &Path) -> anyhow::Result<()> {
+fn copy_tree(src: &Path, dest: &Path) -> anyhow::Result<()> {
     let metadata =
         std::fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?;
     let file_type = metadata.file_type();

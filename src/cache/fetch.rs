@@ -88,16 +88,9 @@ impl Cache<'_> {
     async fn fetch_git(&self, repo: String, commit: String) -> anyhow::Result<()> {
         let dest = self.out_dir.join("checkouts").join(&commit);
         if let Some(dir) = self.git_checkouts {
-            let copy = (dir.to_owned(), commit.clone(), dest.clone());
-            let copied = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-                let (dir, commit, dest) = copy;
-                let Some(src) = crate::git_checkouts::find(&dir, &commit)? else {
-                    return Ok(false);
-                };
-                std::fs::create_dir_all(dest.parent().expect("checkouts/<commit> has a parent"))
-                    .context("creating checkouts directory")?;
-                crate::git_checkouts::copy_tree(&src, &dest)?;
-                Ok(true)
+            let copied = tokio::task::spawn_blocking({
+                let (dir, commit, dest) = (dir.to_owned(), commit.clone(), dest.clone());
+                move || crate::git_checkouts::copy_checkout(&dir, &commit, &dest)
             })
             .await
             .context("joining the checkout copy")?
